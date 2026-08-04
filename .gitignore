@@ -1,0 +1,46 @@
+# secrets
+.env
+*.key
+secrets.*
+# The pattern above is meant to catch stray real-secret dumps (secrets.json,
+# secrets.txt, etc.) -- but on a case-insensitive filesystem/git config (the
+# default on Windows) it ALSO silently matches docs/SECRETS.md, this
+# project's actual (non-secret) policy doc, excluding it from git with no
+# warning. Caught by manually reviewing `git status` before the first
+# commit -- see docs/SECRETS.md itself for why that check matters. Explicit
+# exception so this can't happen again:
+!docs/SECRETS.md
+
+# Kindle daemon's real config (contains your home LAN IP and any local
+# overrides). kindle-daemon/config.example.lua stays tracked as the
+# template; the real kindle-daemon/src/config.lua does not.
+kindle-daemon/src/config.lua
+
+# Cached Kindle IP from the ops start/stop scripts -- local network state,
+# not something to version.
+kindle-daemon/ops/.last_kindle_ip.txt
+
+# Claude Code's own local settings -- machine-specific absolute paths and
+# permission grants, not something to share/version.
+.claude/settings.local.json
+
+# Claude Code's session lock files -- runtime artifacts (session ID, PID,
+# start time), not something to version. Previously excluded only via
+# .git/info/exclude (local-only, not shared with a fresh clone) -- added
+# here too so anyone else who clones this repo gets the same exclusion.
+.claude/*.lock
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# build artifacts
+*.o
+*.out
+build/
+
+# OS
+.DS_Store
+Thumbs.db

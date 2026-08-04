@@ -1,0 +1,18 @@
+# Real secrets (also covered by the repo root .gitignore, kept here too
+# since this folder should be self-explanatory on its own).
+.env
+
+# Local persisted state -- personal task data, shouldn't be versioned.
+data/state.json
+data/.state_*.tmp
+# Preserved-on-corruption backups (see state.py's _load) -- also personal
+# task data, same reasoning as state.json itself.
+data/state.corrupt-*.json
+
+# Backend log files written by backend/ops/run_backend.ps1 -- local
+# diagnostics only, never versioned.
+logs/*.log
+
+# Python
+__pycache__/
+*.pyc

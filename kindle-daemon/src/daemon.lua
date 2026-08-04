@@ -1,0 +1,686 @@
+#!/./luajit
+--[[
+daemon.lua -- entry point. Run via bin/run.sh, which cd's into this
+directory first (so require("config") etc. resolve relative to here) and
+execs `luajit daemon.lua`. See kindle-daemon/README.md for the overall
+design and kindle-daemon/INSTALL.md for how to actually get this running
+and boot-persistent on the device.
+
+This process is meant to run forever. Per embedded-systems practice, the
+per-iteration body of the main loop is wrapped in pcall so a single bad
+event (a malformed touch read, a JSON decode hiccup, a drawing call that
+fails) gets logged and the loop keeps going instead of taking the whole
+dashboard down. If something well and truly unexpected escapes anyway,
+we log it and exit(1) rather than spin -- the upstart job (see
+install/kindle-dashboard.conf) has `respawn`, so upstart will restart us
+cleanly rather than the process wedging in a bad state forever.
+]]
+
+local log = require("log")
+local ok_cfg, config = pcall(require, "config")
+if not ok_cfg then
+    io.stderr:write("FATAL: could not load config.lua -- did you copy " ..
+        "config.example.lua to config.lua and edit it? See INSTALL.md.\n")
+    os.exit(1)
+end
+
+log.init(config.log_path)
+log.info("daemon starting up")
+
+-- config.laptop_ip is a static fallback; it goes stale the moment the
+-- laptop switches wifi networks (different router = different subnet).
+-- ops/start_dashboard.ps1 auto-detects the laptop's current LAN IP and
+-- passes it here via LAPTOP_IP every run, so no manual config.lua edit is
+-- needed after a network change -- this override just wins when present.
+local env_laptop_ip = os.getenv("LAPTOP_IP")
+if env_laptop_ip and env_laptop_ip ~= "" then
+    log.info("daemon: overriding config.laptop_ip with LAPTOP_IP env var (" .. env_laptop_ip .. ")")
+    config.laptop_ip = env_laptop_ip
+end
+
+local posix = require("posix")
+local websocket = require("websocket")
+local touch = require("touch")
+local json = require("json")
+local ui = require("ui")
+
+ui.init(config.fbink_path, log)
+
+-- ===================== touch input setup =====================
+
+local touch_device_path = config.touch_device_path
+if not touch_device_path then
+    touch_device_path = touch.autodetect_device(log)
+    if not touch_device_path then
+        log.warn("touch: could not auto-detect a touch device from " ..
+            "/proc/bus/input/devices. Touch input will be disabled -- " ..
+            "the dashboard will still display and update from the " ..
+            "backend, but taps won't do anything until you set " ..
+            "touch_device_path explicitly in config.lua. See INSTALL.md step 3.")
+    end
+end
+
+local touch_reader = nil
+if touch_device_path then
+    local tr, err = touch.open(touch_device_path, log, {
+        swap_xy = config.touch_swap_xy,
+        invert_x = config.touch_invert_x,
+        invert_y = config.touch_invert_y,
+        screen_w = 600,
+        screen_h = 800,
+    })
+    if tr then
+        touch_reader = tr
+    else
+        log.warn("touch: " .. tostring(err))
+    end
+end
+
+-- ===================== websocket connection management =====================
+
+local conn = nil
+local conn_status = "connecting" -- "connecting" | "open" | "offline"
+local reconnect_backoff_ms = config.reconnect_min_ms
+local next_reconnect_at = 0 -- os.clock()-based monotonic-ish deadline
+
+-- Monotonic-ish clock in milliseconds, read from /proc/uptime (plain
+-- text, no FFI needed). We deliberately do NOT use os.clock(): that
+-- measures CPU time, not wall-clock time, and barely advances while this
+-- process is blocked inside poll() waiting for input -- which is most of
+-- the time -- so backoff/redraw timers built on it would effectively
+-- never fire. Falls back to os.time()*1000 (1-second resolution, but
+-- still real wall-clock time) if /proc/uptime is ever unreadable.
+local function now_ms()
+    local f = io.open("/proc/uptime", "r")
+    if f then
+        local line = f:read("*l")
+        f:close()
+        local seconds = line and tonumber(line:match("^%S+"))
+        if seconds then
+            return math.floor(seconds * 1000)
+        end
+    end
+    return os.time() * 1000
+end
+
+-- Toast auto-dismiss state (only meaningful while ui_mode == "dashboard"
+-- -- the toast overlays the nav bar, which only exists in dashboard
+-- mode; see ui.flash_message()'s doc comment in ui.lua). User-requested
+-- (2026-08-02 live device session): every toast is pure FYI with nothing
+-- clickable of its own, so it doesn't need to sit on screen indefinitely
+-- waiting for some unrelated redraw to clear it. show_flash() below is
+-- the ONLY place in this file that should call ui.flash_message()
+-- directly from here on -- every OTHER call site in this file should go
+-- through show_flash() instead, so every toast gets this timer for free
+-- rather than some call sites remembering to set it and others not.
+-- Declared up here (immediately after now_ms(), its only dependency)
+-- rather than down with the rest of the UI-mode state below, specifically
+-- so handle_restart_ssh() further down can already use it -- Lua locals
+-- must be declared before use, no hoisting.
+local flash_expire_at_ms = nil
+local FLASH_DURATION_MS = 3000
+
+local function show_flash(text)
+    ui.flash_message(text)
+    flash_expire_at_ms = now_ms() + FLASH_DURATION_MS
+end
+
+--- Run a shell command and capture its combined stdout+stderr output, for
+--- the one feature (Restart SSH) that actually needs to see what a shell
+--- command printed rather than just fire-and-forget it. Everywhere else
+--- in this codebase (ui.lua, tools/*.lua) uses os.execute() instead,
+--- since they only ever cared about pass/fail, not output -- io.popen is
+--- the standard Lua idiom for the "I need the output" case os.execute
+--- can't cover.
+---
+--- Returns (output_string, close_ok). close_ok mirrors the same
+--- platform-dependent looseness ui.lua's M.run() already documents for
+--- os.execute()'s return value -- treat it as informational, not as the
+--- sole source of truth (the Restart SSH feature re-checks with a real
+--- process check afterward rather than trusting this alone; see
+--- handle_restart_ssh below).
+local function shell_capture(cmd)
+    -- Wrap in a subshell before appending 2>&1: config.ssh_restart_cmd is
+    -- a multi-statement compound command (cd && dropbear; iptables ...;
+    -- iptables ...) -- appending redirection to the bare string only
+    -- scopes it over the LAST clause, silently dropping stderr from
+    -- every earlier statement, which is exactly the diagnostic most
+    -- likely to explain a failure (e.g. `cd` failing because
+    -- config.lua's koreader path is wrong). The parens make the
+    -- redirection apply to the whole compound command instead.
+    local fh = io.popen("(" .. cmd .. ") 2>&1")
+    if not fh then
+        return nil, false
+    end
+    local output = fh:read("*a") or ""
+    local close_ok = fh:close()
+    return output, (close_ok == true)
+end
+
+--- CONFIRMED ON HARDWARE (2026-08-02, live SSH session): dropbear is the
+--- process KOReader's own SSH.koplugin starts, and it's a real running
+--- process (not just a pidfile) whenever SSH is up. Uses `ps | grep` with
+--- the classic "[d]ropbear" bracket trick (so the grep process's own argv
+--- doesn't match itself) rather than `pgrep -f dropbear` -- pgrep's
+--- presence on this device's busybox build was not separately confirmed,
+--- while `ps`/`grep` are already relied on elsewhere in this project's
+--- tooling assumptions, so this is the more conservative choice.
+local function is_dropbear_running()
+    local output = shell_capture("ps | grep '[d]ropbear'")
+    return output ~= nil and output:find("%S") ~= nil
+end
+
+--- Handles the "Restart SSH" button: starts dropbear (KOReader's SSH
+--- server) via config.ssh_restart_cmd if it isn't already running, and
+--- always leaves the user with an on-screen toast saying what happened --
+--- this is the one piece of on-device UI that exists specifically so a
+--- lost SSH session can be recovered without a full device reboot.
+local function handle_restart_ssh()
+    log.info("restart_ssh: button tapped")
+    if is_dropbear_running() then
+        log.info("restart_ssh: dropbear already running, nothing to do")
+        show_flash("SSH already running")
+        return
+    end
+
+    if not config.ssh_restart_cmd or config.ssh_restart_cmd == "" then
+        log.warn("restart_ssh: config.ssh_restart_cmd is not set in config.lua")
+        show_flash("SSH restart not configured")
+        return
+    end
+
+    log.info("restart_ssh: dropbear not running, attempting to start it")
+    local output = shell_capture(config.ssh_restart_cmd)
+    log.info("restart_ssh: command output: " .. tostring(output))
+
+    -- dropbear daemonizes itself (forks to background) rather than
+    -- blocking, per the confirmed start command this mirrors -- give it
+    -- a brief moment before re-checking rather than racing the fork.
+    os.execute("sleep 1")
+
+    if is_dropbear_running() then
+        log.info("restart_ssh: dropbear started successfully")
+        show_flash("SSH started (port 2222)")
+    else
+        log.warn("restart_ssh: dropbear still not running after start attempt")
+        local trimmed = (output or ""):gsub("%s+$", ""):sub(1, 60)
+        show_flash("SSH start failed" .. (trimmed ~= "" and (": " .. trimmed) or ""))
+    end
+end
+
+local function try_connect()
+    log.info(string.format("ws: attempting connection to %s:%d%s",
+        config.laptop_ip, config.laptop_port, config.ws_path))
+    local c, err = websocket.connect(config.laptop_ip, config.laptop_port, config.ws_path)
+    if not c then
+        log.warn("ws: connect failed: " .. tostring(err))
+        conn = nil
+        conn_status = "offline"
+        -- Same backoff the "closed" event handler applies after a
+        -- connect-then-drop -- previously missing here, so an outright
+        -- connect() failure (e.g. no route to host during a real network
+        -- outage) retried as fast as the main loop's poll cadence allowed
+        -- (~every poll_timeout_ms) instead of backing off.
+        next_reconnect_at = now_ms() + reconnect_backoff_ms
+        reconnect_backoff_ms = math.min(reconnect_backoff_ms * 2, config.reconnect_max_ms)
+        return
+    end
+    conn = c
+    conn_status = "connecting"
+end
+
+-- ===================== dashboard state + redraw =====================
+
+local current_state = nil
+local current_hit_zones = {}
+local last_clock_redraw_ms = 0
+local task_page = 1 -- which page of tasks is showing; see ui.lua's
+                     -- draw_dashboard doc comment for the pagination model
+
+-- UI mode: which screen is currently on the e-ink display and therefore
+-- which set of hit_zones current_hit_zones holds. daemon.lua is the sole
+-- owner of this (and all other UI-adjacent state below) -- ui.lua stays a
+-- pure "given this state, draw these pixels and return hit_zones"
+-- renderer, matching the existing separation of concerns in this file.
+--   "dashboard" -- the normal Today view (default)
+--   "keyboard"  -- the on-screen keyboard for the Add Task flow
+--   "confirm_exit" -- the Exit Dashboard confirmation screen
+local ui_mode = "dashboard"
+
+-- Add Task flow state (only meaningful while ui_mode == "keyboard").
+local keyboard_buffer = ""
+
+-- Delete-armed state (only meaningful while ui_mode == "dashboard"): the
+-- id of a task whose delete zone was tapped once and is now waiting for
+-- a confirming second tap within DELETE_CONFIRM_WINDOW_MS. Reuses the
+-- now_ms() monotonic-ish clock already defined above, same as the
+-- websocket reconnect backoff does.
+local armed_delete_id = nil
+local armed_delete_until_ms = 0
+local DELETE_CONFIRM_WINDOW_MS = 4000
+
+local function redraw(reason)
+    log.info("redraw: " .. reason .. " (mode=" .. ui_mode .. ")")
+    local ok, hit_zones_or_err, effective_page = pcall(function()
+        if ui_mode == "keyboard" then
+            return ui.draw_keyboard(keyboard_buffer)
+        elseif ui_mode == "confirm_exit" then
+            return ui.draw_confirm_exit()
+        else
+            return ui.draw_dashboard(current_state, conn_status, task_page, armed_delete_id)
+        end
+    end)
+    if ok then
+        current_hit_zones = hit_zones_or_err
+        if ui_mode == "dashboard" then
+            -- ui.lua clamps task_page to however many pages currently
+            -- exist (e.g. after tasks are completed/deleted and the list
+            -- shrinks); store that back so we don't keep requesting a
+            -- page that no longer exists. Not meaningful for the other
+            -- ui_modes, which don't return a second value.
+            task_page = effective_page or task_page
+        end
+        last_clock_redraw_ms = now_ms()
+    else
+        log.error("redraw failed: " .. tostring(hit_zones_or_err))
+    end
+end
+
+--- Like redraw(), but only actually redraws while the dashboard is the
+--- active screen -- for the passive/background triggers (a new state
+--- push from the backend, a connection status change, the periodic clock
+--- tick) that should update quietly behind the scenes rather than
+--- yanking the user out of the keyboard or the exit-confirm screen
+--- they're currently looking at. current_state/conn_status themselves
+--- are still updated by the caller either way; this only gates whether
+--- that change gets drawn right now. Whatever's pending is picked up by
+--- the next redraw() once ui_mode returns to "dashboard" (both the
+--- keyboard's cancel/confirm paths and the confirm-exit's cancel path
+--- already call redraw() unconditionally on the way back).
+local function redraw_if_dashboard(reason)
+    if ui_mode == "dashboard" then
+        redraw(reason)
+    end
+end
+
+local function hit_test(x, y)
+    for _, z in ipairs(current_hit_zones) do
+        if x >= z.x and x < z.x + z.w and y >= z.y and y < z.y + z.h then
+            return z
+        end
+    end
+    return nil
+end
+
+local function handle_dashboard_tap(zone)
+    -- Delete-armed state takes priority over everything else: if a
+    -- delete is currently armed, this tap either confirms it (same zone,
+    -- within the window) or disarms it -- and does NOTHING else, even if
+    -- it also happens to land on some other tappable zone. This is
+    -- deliberate: while a delete confirmation is showing, a stray tap
+    -- elsewhere should read as "never mind, cancel that", not as
+    -- simultaneously cancelling AND performing some unrelated action.
+    if armed_delete_id ~= nil then
+        local n = now_ms()
+        local still_armed = n < armed_delete_until_ms
+        if still_armed and zone and zone.kind == "delete_task_zone" and zone.id == armed_delete_id then
+            -- CONFIRMED ON HARDWARE (2026-08-02): show_flash() then
+            -- redraw() (the original order here) meant the very next full
+            -- dashboard redraw immediately painted over the toast before
+            -- it was ever visible -- redraw() always wins since it draws
+            -- the ENTIRE screen, including the nav bar the toast overlays.
+            -- Fixed by flipping the order: redraw() first (so the row's
+            -- armed/not-armed state is correct), then show_flash() LAST
+            -- so it's the last thing painted and actually stays visible
+            -- for its full auto-dismiss window instead of for zero
+            -- perceptible time.
+            local failure_toast = nil
+            if conn and conn_status == "open" then
+                local send_ok, send_err = conn:send_text(json.encode({ action = "delete_task", id = armed_delete_id }))
+                if send_ok then
+                    log.info("sent delete_task id=" .. tostring(armed_delete_id))
+                    armed_delete_id = nil
+                else
+                    -- conn_status can still read "open" here even though
+                    -- the write itself just failed -- conn_status only
+                    -- flips to "offline" once poll() notices the socket
+                    -- error on a LATER loop iteration. Don't clear
+                    -- armed_delete_id or claim success: leave the row
+                    -- armed so the existing expiry timeout disarms it
+                    -- visibly instead of silently pretending this worked.
+                    log.warn("delete_task send failed: " .. tostring(send_err))
+                    failure_toast = "Couldn't send -- not connected?"
+                end
+            else
+                failure_toast = "Not connected -- can't delete tasks right now"
+                armed_delete_id = nil
+            end
+            redraw("delete confirmed")
+            if failure_toast then
+                show_flash(failure_toast)
+            end
+            return
+        else
+            log.info("delete confirmation disarmed (tapped elsewhere or window expired)")
+            armed_delete_id = nil
+            redraw("delete disarmed")
+            return
+        end
+    end
+
+    if not zone then
+        log.info("tap did not hit any known zone")
+        return
+    end
+
+    if zone.kind == "toggle_task" then
+        if conn and conn_status == "open" then
+            local send_ok, send_err = conn:send_text(json.encode({ action = "toggle_task", id = zone.id }))
+            if send_ok then
+                log.info("sent toggle_task id=" .. tostring(zone.id))
+            else
+                log.warn("toggle_task send failed: " .. tostring(send_err))
+                show_flash("Couldn't send -- not connected?")
+            end
+        else
+            show_flash("Not connected -- can't update tasks right now")
+        end
+    elseif zone.kind == "delete_task_zone" then
+        armed_delete_id = zone.id
+        armed_delete_until_ms = now_ms() + DELETE_CONFIRM_WINDOW_MS
+        log.info("delete armed for task id=" .. tostring(zone.id))
+        redraw("delete armed")
+    elseif zone.kind == "see_more_tasks" then
+        task_page = zone.next_page
+        redraw("see more tasks tapped")
+    elseif zone.kind == "add_task_button" then
+        keyboard_buffer = ""
+        ui_mode = "keyboard"
+        redraw("add task tapped, entering keyboard")
+    elseif zone.kind == "exit_dashboard_button" then
+        ui_mode = "confirm_exit"
+        redraw("exit dashboard tapped, showing confirmation")
+    elseif zone.kind == "restart_ssh_button" then
+        handle_restart_ssh()
+    elseif zone.kind == "refresh_usage_button" then
+        if conn and conn_status == "open" then
+            local send_ok, send_err = conn:send_text(json.encode({ action = "refresh_usage" }))
+            if send_ok then
+                log.info("sent refresh_usage")
+                show_flash("Refreshing usage...")
+            else
+                log.warn("refresh_usage send failed: " .. tostring(send_err))
+                show_flash("Couldn't send -- not connected?")
+            end
+        else
+            show_flash("Not connected -- can't refresh right now")
+        end
+    elseif zone.kind == "nav_tab" then
+        if zone.name == "Today" then
+            -- already the active tab, nothing to do
+        else
+            show_flash(zone.name .. " is coming soon.")
+        end
+    end
+end
+
+local function handle_keyboard_tap(zone)
+    if not zone then return end
+
+    if zone.kind == "keyboard_key" then
+        keyboard_buffer = keyboard_buffer .. zone.char
+        ui.update_keyboard_preview(keyboard_buffer) -- fast partial refresh, not a full redraw()
+    elseif zone.kind == "keyboard_space" then
+        keyboard_buffer = keyboard_buffer .. " "
+        ui.update_keyboard_preview(keyboard_buffer)
+    elseif zone.kind == "keyboard_backspace" then
+        if #keyboard_buffer > 0 then
+            keyboard_buffer = keyboard_buffer:sub(1, -2)
+            ui.update_keyboard_preview(keyboard_buffer)
+        end
+    elseif zone.kind == "keyboard_cancel" then
+        log.info("add task cancelled, buffer discarded")
+        keyboard_buffer = ""
+        ui_mode = "dashboard"
+        redraw("add task cancelled")
+    elseif zone.kind == "keyboard_confirm" then
+        if keyboard_buffer:match("^%s*$") then
+            -- Nothing typed (or only spaces -- backend/main.py's own
+            -- add_task strips the text server-side and rejects an
+            -- all-whitespace result with a bad_request error; matching
+            -- that same "^%s*$" emptiness check here means a few taps of
+            -- SPACE can never round-trip to the backend and back as a
+            -- visible error toast in the first place). Silently ignore
+            -- rather than showing a toast: flash_message()'s fixed screen
+            -- position is tuned for the dashboard's nav-bar layout, not
+            -- this screen's, and since only the preview strip gets
+            -- partial-refreshed here (see ui.update_keyboard_preview), a
+            -- toast drawn elsewhere on this screen would stay stuck on
+            -- top of the keyboard until the next full redraw. Simplest
+            -- safe behavior: do nothing until there's actually something
+            -- to add.
+            return
+        end
+        if conn and conn_status == "open" then
+            local send_ok, send_err = conn:send_text(json.encode({ action = "add_task", text = keyboard_buffer }))
+            if send_ok then
+                log.info("sent add_task text=" .. keyboard_buffer)
+                keyboard_buffer = ""
+                ui_mode = "dashboard"
+                redraw("add task confirmed and sent")
+            else
+                -- conn_status can still read "open" here even though the
+                -- write itself just failed -- see the matching comment on
+                -- the delete_task path above. Same treatment as the
+                -- not-connected branch below: keep the user in keyboard
+                -- mode with their typed text intact rather than claiming
+                -- success and silently losing it.
+                log.warn("add_task send failed: " .. tostring(send_err))
+            end
+        else
+            -- Same reasoning as the empty-buffer case above: no toast,
+            -- since it would leave stale pixels on this screen. The
+            -- user's typed text is preserved (not cleared, ui_mode
+            -- unchanged) so they don't lose it -- they can retry Add
+            -- once the connection recovers, or Cancel out.
+            log.warn("add_task: not connected, keeping user in keyboard with buffer intact")
+        end
+    end
+end
+
+local function handle_confirm_exit_tap(zone)
+    if not zone then return end
+
+    if zone.kind == "confirm_exit_cancel" then
+        log.info("exit dashboard cancelled")
+        ui_mode = "dashboard"
+        redraw("exit cancelled")
+    elseif zone.kind == "confirm_exit_yes" then
+        -- Per the project's established safety pattern (see this
+        -- project's memory / README.md): always reboot rather than
+        -- attempting a live in-place restart of the stock UI, which was
+        -- previously found to trip lab126_gui's own crash-recovery
+        -- safety net. No need to self-kill this luajit process first --
+        -- the reboot tears everything down anyway.
+        log.info("exit dashboard confirmed -- shutting down and rebooting")
+        ui.draw_shutdown_message()
+        local rm_ok = os.execute("rm -f /etc/upstart/kindle-dashboard.conf")
+        if not (rm_ok == true or rm_ok == 0) then
+            -- Not fatal (falls through to reboot regardless -- reboot is
+            -- the actual point of this action, not the cleanup), but if
+            -- autostart really was enabled and this silently failed, the
+            -- only symptom after reboot is "the dashboard came back even
+            -- though I chose Shut Down" with nothing explaining why.
+            -- One log line now is cheap insurance against that.
+            log.warn("exit: removing /etc/upstart/kindle-dashboard.conf may have failed (rc=" .. tostring(rm_ok) .. ")")
+        end
+        os.execute("sync; reboot")
+    end
+end
+
+local function handle_tap(x, y)
+    log.info(string.format("tap at (%d, %d)", x, y))
+    local zone = hit_test(x, y)
+
+    if ui_mode == "keyboard" then
+        handle_keyboard_tap(zone)
+    elseif ui_mode == "confirm_exit" then
+        handle_confirm_exit_tap(zone)
+    else
+        handle_dashboard_tap(zone)
+    end
+end
+
+-- ===================== main loop =====================
+
+redraw("startup")
+try_connect()
+
+log.info("entering main loop")
+
+while true do
+    local ok, err = pcall(function()
+        local poll_entries = {}
+        if touch_reader then
+            poll_entries[#poll_entries + 1] = { fd = touch_reader.fd }
+        end
+        if conn then
+            poll_entries[#poll_entries + 1] = { fd = conn.fd, want_write = conn:wants_write() }
+        end
+
+        local results
+        if #poll_entries > 0 then
+            results = posix.poll(poll_entries, config.poll_timeout_ms)
+        else
+            results = {}
+            -- nothing to poll (no touch device, no connection yet) --
+            -- avoid a busy loop while we wait for reconnect timing
+            local remaining = config.poll_timeout_ms
+            if remaining > 0 then
+                os.execute("sleep " .. string.format("%.1f", remaining / 1000))
+            end
+        end
+
+        -- --- touch input ---
+        if touch_reader then
+            local r = results[touch_reader.fd]
+            if r and r.readable then
+                local bytes, rerr = posix.read_available(touch_reader.fd)
+                if bytes == nil then
+                    log.warn("touch: read error " .. tostring(rerr) .. " -- closing and retrying")
+                    touch_reader:close()
+                    touch_reader = touch.open(touch_device_path, log)
+                elseif bytes ~= "" then
+                    local taps = touch_reader:feed(bytes)
+                    for _, tap in ipairs(taps) do
+                        handle_tap(tap.x, tap.y)
+                    end
+                end
+            end
+        end
+
+        -- --- websocket ---
+        if conn then
+            local prev_status = conn_status
+            local events = conn:step(results[conn.fd])
+            for _, ev in ipairs(events) do
+                if ev.type == "open" then
+                    conn_status = "open"
+                    reconnect_backoff_ms = config.reconnect_min_ms
+                    log.info("ws: connected")
+                elseif ev.type == "text" then
+                    local decode_ok, decoded = pcall(json.decode, ev.data)
+                    if decode_ok and type(decoded) == "table" and decoded.error then
+                        -- backend/main.py replies to a rejected action
+                        -- (bad_request/not_found/internal_error) on this
+                        -- SAME connection, with no "type" field to tell it
+                        -- apart from a real state.snapshot() push -- e.g.
+                        -- add_task with an all-whitespace buffer (see the
+                        -- keyboard_confirm guard below) or a delete/toggle
+                        -- racing a change made elsewhere (Telegram). Must
+                        -- NOT fall into current_state = decoded below: an
+                        -- error object has no .tasks, so draw_dashboard
+                        -- would render "No tasks yet." and an empty usage
+                        -- card even though the real backend state is
+                        -- untouched -- a normal mis-tap making the whole
+                        -- task list appear to vanish until some unrelated
+                        -- future broadcast overwrites it.
+                        log.warn("ws: backend rejected an action: " .. tostring(decoded.error) ..
+                            " -- " .. tostring(decoded.detail))
+                        show_flash(tostring(decoded.detail or decoded.error))
+                    elseif decode_ok then
+                        current_state = decoded
+                        -- Not redraw() -- if the user is mid-typing on
+                        -- the keyboard screen or looking at the exit
+                        -- confirmation, a state push shouldn't yank them
+                        -- back to the dashboard or draw underneath
+                        -- whatever's currently on screen. See
+                        -- redraw_if_dashboard()'s doc comment above.
+                        redraw_if_dashboard("new state from backend")
+                    else
+                        log.warn("ws: failed to decode message as JSON: " .. tostring(decoded))
+                    end
+                elseif ev.type == "closed" then
+                    log.warn("ws: connection closed (" .. tostring(ev.reason) .. ")")
+                    conn = nil
+                    conn_status = "offline"
+                    next_reconnect_at = now_ms() + reconnect_backoff_ms
+                    reconnect_backoff_ms = math.min(reconnect_backoff_ms * 2, config.reconnect_max_ms)
+                end
+            end
+            if conn_status ~= prev_status and conn_status ~= "open" then
+                redraw_if_dashboard("connection status changed to " .. conn_status)
+            end
+        elseif now_ms() >= next_reconnect_at then
+            try_connect()
+        end
+
+        -- --- delete-confirmation expiry ---
+        -- armed_delete_id is only cleared by a follow-up tap (confirm or
+        -- disarm, see handle_dashboard_tap) -- if the user just walks away
+        -- mid-confirmation, nothing else was clearing it, so the row kept
+        -- showing the "tap again to delete" highlight indefinitely after
+        -- DELETE_CONFIRM_WINDOW_MS actually elapsed (a stray tap after
+        -- that point was still handled correctly as a no-op disarm, since
+        -- handle_dashboard_tap checks the deadline too -- but the on-screen
+        -- state was lying about the window still being open until then).
+        -- Checked every loop iteration (poll_timeout_ms cadence) so the
+        -- highlight clears itself promptly instead of waiting for the
+        -- next unrelated redraw.
+        if armed_delete_id ~= nil and now_ms() >= armed_delete_until_ms then
+            log.info("delete confirmation expired (no follow-up tap)")
+            armed_delete_id = nil
+            redraw_if_dashboard("delete confirmation expired")
+        end
+
+        -- --- toast auto-dismiss ---
+        -- Deliberately does NOT use redraw_if_dashboard() (which would do
+        -- a full, comparatively expensive GC16 dashboard redraw just to
+        -- clear a toast) -- ui.clear_flash_message() only repaints the
+        -- nav bar strip the toast overlaid, which is all that needs
+        -- restoring. Gated on ui_mode == "dashboard" for the same reason
+        -- armed-delete expiry doesn't fire outside dashboard mode: if the
+        -- user has since moved to the keyboard or exit-confirm screen,
+        -- calling ui.clear_flash_message() would incorrectly paint a nav
+        -- bar over whatever that screen is actually showing at that same
+        -- pixel region. In that case just clear the timer with nothing
+        -- drawn -- that other screen's own cancel/confirm paths already
+        -- do a full unconditional redraw() on the way back to the
+        -- dashboard, which naturally clears any stale toast pixels too.
+        if flash_expire_at_ms ~= nil and now_ms() >= flash_expire_at_ms then
+            flash_expire_at_ms = nil
+            if ui_mode == "dashboard" then
+                ui.clear_flash_message()
+            end
+        end
+
+        -- --- periodic clock redraw ---
+        if (now_ms() - last_clock_redraw_ms) >= config.clock_redraw_interval_ms then
+            redraw_if_dashboard("periodic clock tick")
+        end
+    end)
+
+    if not ok then
+        log.error("main loop iteration raised an error (continuing): " .. tostring(err))
+    end
+end
