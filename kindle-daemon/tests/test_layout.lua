@@ -627,6 +627,27 @@ do
         active_tab_of(restored2), "Today")
 end
 
+print("\n=== locked (blank) screen ===")
+do
+    local ops, zones = render(ui.draw_blank_screen)
+    check_in_bounds("blank screen", ops)
+    check("locked screen registers NO hit zones", #zones == 0, #zones .. " zones")
+
+    -- It must actually cover the whole display: a blank that missed a
+    -- strip would leave a band of the old dashboard visible.
+    local covers = false
+    for _, o in ipairs(ops) do
+        if o.op == "rect" and o.x == 0 and o.y == 0
+            and o.w == L.screen_w and o.h == L.screen_h then covers = true end
+    end
+    check("blanks the entire 600x800 screen", covers)
+
+    -- And it must be genuinely blank -- no leftover text of any kind.
+    local text_count = 0
+    for _, o in ipairs(ops) do if o.op == "text" then text_count = text_count + 1 end end
+    check("draws no text at all", text_count == 0, text_count .. " text draws")
+end
+
 print("\n=== other screens still render cleanly ===")
 do
     local ops, zones = render(ui.draw_keyboard, "hello world")

@@ -178,6 +178,49 @@ smoothly, and every redraw is a visible flash). Two ways to move:
   computed *after* the screen transform, so `swap_xy`/`invert_*` can't
   produce a page turn that goes the opposite way from the user's thumb.
 
+### Screen lock (power button)
+
+Pressing the Kindle's power button blanks the screen; pressing it again
+brings the dashboard back on whatever tab you left it on. `src/keys.lua`
+reads the button, `daemon.lua` owns the `screen_locked` flag.
+
+**The point is power, and on e-ink a static image costs nothing to keep
+on screen** — all the power goes on screen *refreshes* and on the CPU
+waking to perform them. So locking suppresses the work, not just the
+pixels:
+
+- the periodic clock redraw stops
+- the battery poll stops entirely (the sysfs read too, not just drawing)
+- state pushes from the laptop still update memory but draw nothing, so
+  unlocking shows current data rather than a stale screen
+- touch input is ignored outright — a locked dashboard in a bag should
+  not be completing tasks
+
+`redraw()` enforces the lock centrally rather than each call site
+checking, because a dozen paths can trigger a draw and one of them
+forgetting would put pixels back on a locked screen. The two draws that
+*don't* go through `redraw()` — the toast (`show_flash`) and the toast's
+auto-dismiss — are guarded individually; both are noted in the code.
+
+The WebSocket stays connected while locked. Dropping it would save a
+little radio power, but an unlock would then show stale data until a
+reconnect finished, and this device's wifi is historically the least
+reliable part of the system (see `ops/README.md`). The bigger win, if
+this is ever worth pushing further, would be real suspend-to-RAM —
+`powerd` is still running and, confirmed on hardware, ignores the button
+entirely, so that avenue is open.
+
+CONFIRMED ON HARDWARE (2026-08-11): the button is the PMIC on-key
+(`max77696-onkey`, `/dev/input/event0`) and emits a clean
+`KEY_POWER` press/release pair with no repeat and no bounce. Nothing else
+claims it — no process holds the node open, and `powerd` neither suspends
+the device nor reacts. That is a different situation from the touch
+panel, where Xorg *does* hold an exclusive grab and has to be stopped
+first. The daemon acts on the **release** edge, both because that's the
+conventional edge for a toggle and because this PMIC has a separate
+long-press "manual reset" line that powers the device off — triggering on
+press would fire the toggle on the way into a deliberate power-off.
+
 ### The battery indicator
 
 Top-right of the header, on the clock's row. `src/battery.lua` probes a
@@ -375,6 +418,8 @@ kindle-daemon/
                               (tap / swipe / inert drag)
     battery.lua           -- battery percentage: ranked source probe,
                               cached winner, explicit "unknown" on failure
+    keys.lua              -- hardware button (power key) reader + device
+                              auto-detection by KEY_POWER capability
     websocket.lua         -- minimal RFC 6455 client (text frames only)
     sha1.lua              -- pure-Lua SHA-1 (WebSocket handshake only)
     base64.lua            -- pure-Lua base64 encode (handshake only)
@@ -387,6 +432,9 @@ kindle-daemon/
                              no device and no network
     test_gestures.lua      -- tap/swipe/drag classification, incl. the screen
                               transform and gestures split across reads
+    test_keys.lua          -- power-button decoding, and the KEY_POWER bitmap
+                              arithmetic used to auto-detect the device (run
+                              against this Kindle's real /proc content)
     test_layout.lua        -- renders every screen with a recorder in place of
                               fbink, then checks nothing is drawn off-screen,
                               no tap targets overlap or fall under 40px, and

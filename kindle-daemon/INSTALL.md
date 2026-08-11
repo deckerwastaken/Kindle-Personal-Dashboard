@@ -259,6 +259,24 @@ exposes. Find one that prints a plain 0-100 integer and add its path to
 on at startup, so `grep battery /mnt/us/kindle-daemon/daemon.log` also
 tells you what it tried.
 
+#### Testing the screen lock
+
+Press the Kindle's power button once: the screen should go completely
+blank. Tapping does nothing while it's blank (deliberate -- touch is
+locked out too). Press it again and the dashboard comes straight back on
+whatever tab you left it on.
+
+If the button does nothing, check what the daemon found at startup:
+
+```sh
+grep keys: /mnt/us/kindle-daemon/daemon.log
+```
+
+It logs every input device it considered and which one it picked. If it
+found none, set `power_key_device_path` in `src/config.lua` to the right
+`/dev/input/eventN`. Everything else keeps working either way -- a
+missing power button only costs you the lock.
+
 #### Testing swipe gestures
 
 `tools/tap_test.lua` now prints how each gesture was classified along

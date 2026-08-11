@@ -199,7 +199,9 @@ things worth knowing up front:
    within a few seconds. Tap a checkbox — it should toggle. Send `/add something` on
    Telegram — it should appear on screen without you touching anything. Tap the
    **Learning** tab at the bottom to see your courses and books, and **Today** to come
-   back. Let it run a few minutes, then Ctrl+C.
+   back. Press the **power button** once to blank the screen (this also pauses the
+   dashboard's background work to save battery) and again to bring it back. Let it run
+   a few minutes, then Ctrl+C.
 
    If the battery shows a gray `--%`, the dashboard couldn't read this Kindle's battery
    level and is saying so honestly rather than showing a made-up number. Everything

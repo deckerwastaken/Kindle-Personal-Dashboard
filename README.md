@@ -3,7 +3,8 @@
 A personal dashboard on a jailbroken Kindle e-reader: a Today screen with
 your task list and Claude usage, a Learning screen tracking your progress
 through courses and books, and a Telegram bot to feed both — rendered
-directly to the e-ink screen and controlled by touch and swipe. No cloud,
+directly to the e-ink screen and controlled by touch, swipe, and the
+power button (which locks the screen and idles the dashboard). No cloud,
 no third-party service — the backend runs on your own laptop.
 
 ## Start here
@@ -34,11 +35,12 @@ docs/          -- setup guide, jailbreak reference, and secrets policy.
 
 ## Tests
 
-There are four suites. All of them run on your laptop with no Kindle, no
+There are five suites. All of them run on your laptop with no Kindle, no
 network, and nothing to install beyond what the backend already needs:
 
 ```
 cd kindle-daemon/tests && luajit test_gestures.lua        # tap/swipe classification
+cd kindle-daemon/tests && luajit test_keys.lua            # power button / screen lock
 cd kindle-daemon/tests && luajit test_layout.lua          # every screen's layout
 cd kindle-daemon/tests && luajit test_hit_resolution.lua  # what a tap actually hits
 python backend/tests/test_learnings.py                    # from the repo root

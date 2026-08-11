@@ -40,6 +40,20 @@ return {
     -- one here once you've identified it.
     touch_device_path = nil,
 
+    -- Power-button device node, used for the screen lock (press to blank
+    -- the screen and pause the dashboard's timers, press again to bring
+    -- it back -- see src/keys.lua). Leave as nil to auto-detect, which
+    -- works by looking for a device that advertises the KEY_POWER
+    -- capability rather than by matching a device name, so it should be
+    -- correct on any Kindle. On the reference device (Kindle 7 / KT2)
+    -- this resolves to /dev/input/event0, "max77696-onkey".
+    --
+    -- If no power button is found, everything else works exactly as
+    -- normal and only the screen lock is unavailable -- the daemon logs
+    -- which devices it considered, so check daemon.log before hardcoding
+    -- a path here.
+    power_key_device_path = nil,
+
     -- Touch coordinate calibration. Some e-ink touch controllers are
     -- wired up in a different orientation than the screen itself (e.g. a
     -- panel that's physically landscape-native reporting raw coordinates

@@ -1808,6 +1808,34 @@ function M.draw_confirm_exit()
     return hit_zones
 end
 
+--- Blanks the screen for the locked state (power button, see daemon.lua).
+---
+--- Plain WHITE, with nothing drawn on it at all -- the "full blank
+--- screen" this was asked for.
+---
+--- WHITE rather than BLACK for two reasons. E-ink holds either state
+--- with zero power, so there is no power argument between them, but a
+--- full-black fill left standing for hours is the classic way to build
+--- up persistent ghosting that a later screen has to fight; and a black
+--- rectangle on a Kindle reads as "broken/asleep mid-refresh" whereas a
+--- blank white page reads as "off", which is what the state actually is.
+---
+--- Uses GC16 (full-quality) deliberately, and this is the one place in
+--- this file where the slowest waveform is the RIGHT choice: it fully
+--- settles every pixel, so the locked screen is genuinely clean rather
+--- than a faint after-image of the dashboard. It also runs at most twice
+--- per lock/unlock cycle, so its cost is irrelevant.
+---
+--- Returns no hit_zones: locking deliberately takes touch out of play
+--- entirely (see daemon.lua's handle_gesture), so there is nothing on
+--- this screen to hit-test against. That is the point -- a locked
+--- dashboard in a bag should not be tappable.
+function M.draw_blank_screen()
+    M.fill_rect(0, 0, L.screen_w, L.screen_h, "WHITE")
+    M.flush("GC16")
+    return {}
+end
+
 --- One-shot terminal message drawn right before daemon.lua's actual
 --- `sync; reboot` call -- NOT part of the ui_mode/hit_zones system, since
 --- there is nothing left to tap once this is on screen.

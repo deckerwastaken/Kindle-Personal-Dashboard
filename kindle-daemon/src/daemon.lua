@@ -41,6 +41,7 @@ end
 local posix = require("posix")
 local websocket = require("websocket")
 local touch = require("touch")
+local keys = require("keys")
 local json = require("json")
 local ui = require("ui")
 local battery = require("battery")
@@ -103,6 +104,29 @@ if touch_device_path then
     end
 end
 
+-- ===================== power button setup =====================
+--
+-- Optional: if no power-button device is found, everything else works
+-- exactly as before and only the screen-lock feature is unavailable.
+-- config.power_key_device_path forces a specific node (existing
+-- config.lua files won't have the key at all, which reads as nil and
+-- means "auto-detect" -- so no config regeneration is needed).
+
+local power_key_path = config.power_key_device_path
+if not power_key_path then
+    power_key_path = keys.autodetect_device(log)
+end
+
+local key_reader = nil
+if power_key_path then
+    local kr, kerr = keys.open(power_key_path, log)
+    if kr then
+        key_reader = kr
+    else
+        log.warn("keys: " .. tostring(kerr) .. " -- screen lock disabled")
+    end
+end
+
 -- ===================== websocket connection management =====================
 
 local conn = nil
@@ -147,7 +171,45 @@ end
 local flash_expire_at_ms = nil
 local FLASH_DURATION_MS = 3000
 
+-- Screen lock (power button). Deliberately NOT another ui_mode value:
+-- locking is orthogonal to which screen you were on, and modelling it as
+-- a mode would mean remembering and restoring the previous one by hand.
+-- As a separate flag, unlocking just redraws whatever ui_mode still says,
+-- including the Add Task keyboard with its typed buffer intact.
+--
+-- What "locked" actually means, and why -- the point of this feature is
+-- power, and on e-ink a static image costs NOTHING to keep on screen.
+-- All the power goes on screen REFRESHES and on the CPU waking up to do
+-- them. So locking suppresses the WORK, not just the pixels:
+--   * the periodic clock redraw stops
+--   * the battery poll stops (the read too, not only the drawing)
+--   * incoming state pushes update current_state but draw nothing
+--   * touch input is ignored entirely
+-- That last one is a feature in its own right: a locked dashboard in a
+-- bag shouldn't be completing tasks.
+--
+-- The WebSocket is deliberately left CONNECTED. Dropping it would save a
+-- little more radio power, but an unlock would then show stale data
+-- until a reconnect completed, and this device's wifi is historically
+-- the least reliable part of the system (see ops/README.md) -- extra
+-- reconnect churn is exactly what we don't want to introduce.
+--
+-- Declared HERE, well above the rest of the UI state, specifically so
+-- show_flash() below can already see it: Lua locals must exist before
+-- they're referenced and there is no hoisting.
+local screen_locked = false
+
 local function show_flash(text)
+    -- Toasts draw straight to the screen rather than going through
+    -- redraw(), so redraw()'s own lock guard doesn't cover them. This is
+    -- the single choke point for every toast in this file (see the
+    -- comment above), which makes it the right place to enforce it --
+    -- otherwise a backend rejection arriving just after the user locked
+    -- the screen would stamp a black bar across the blank display.
+    if screen_locked then
+        log.info("suppressing toast while screen is locked: " .. tostring(text))
+        return
+    end
     ui.flash_message(text)
     flash_expire_at_ms = now_ms() + FLASH_DURATION_MS
 end
@@ -306,6 +368,18 @@ local armed_delete_until_ms = 0
 local DELETE_CONFIRM_WINDOW_MS = 4000
 
 local function redraw(reason)
+    -- A locked screen absorbs every redraw request, wherever it came
+    -- from. Enforcing it HERE rather than at each call site is what
+    -- makes the guarantee actually hold: there are a dozen paths that
+    -- can trigger a draw (state pushes, taps, timers, toasts, page
+    -- turns), and one of them forgetting to check would put pixels back
+    -- on a screen the user has locked. The lock/unlock transition itself
+    -- goes through set_screen_locked below, which draws directly.
+    if screen_locked then
+        log.info("redraw suppressed (screen locked): " .. reason)
+        return
+    end
+
     log.info("redraw: " .. reason .. " (mode=" .. ui_mode .. ")")
     local ok, hit_zones_or_err, effective_page = pcall(function()
         if ui_mode == "keyboard" then
@@ -370,6 +444,40 @@ end
 local function redraw_if_showing_state(reason)
     if ui_mode == "dashboard" or ui_mode == "learning" then
         redraw(reason)
+    end
+end
+
+--- Locks or unlocks the screen. The single place that transition
+--- happens, so the drawing and the state flag can never disagree.
+---
+--- Locking blanks the screen and drops all hit zones, so even if
+--- something did manage to hit-test while locked there would be nothing
+--- to hit. Unlocking sets the flag FIRST and then calls redraw(), which
+--- would otherwise suppress itself -- and that full redraw is what
+--- brings the screen back up to date with any state that arrived while
+--- the user wasn't looking.
+local function set_screen_locked(locked, reason)
+    if locked == screen_locked then return end
+    screen_locked = locked
+
+    if locked then
+        log.info("screen LOCKED (" .. reason .. ") -- blanking, and pausing " ..
+            "the clock redraw, battery poll, and touch input")
+        current_hit_zones = {}
+        local ok, err = pcall(ui.draw_blank_screen)
+        if not ok then
+            -- Don't leave the flag claiming "locked" over a screen that
+            -- still shows the dashboard: that would silently deaden
+            -- every control while everything still LOOKS tappable, which
+            -- is far worse than the lock simply not engaging.
+            log.error("lock: blanking the screen failed (" .. tostring(err) ..
+                ") -- staying unlocked")
+            screen_locked = false
+            return
+        end
+    else
+        log.info("screen UNLOCKED (" .. reason .. ") -- restoring " .. ui_mode)
+        redraw("unlocked")
     end
 end
 
@@ -762,6 +870,15 @@ end
 --- Single entry point for everything touch.lua produces. Kept separate
 --- from handle_tap above so the tap path stays exactly as it was.
 local function handle_gesture(gesture)
+    -- A locked screen ignores touch outright -- taps, swipes, the lot.
+    -- Only the power button can bring it back. This is deliberate: if a
+    -- tap unlocked it, the dashboard would wake every time it shifted in
+    -- a bag, which defeats the whole feature.
+    if screen_locked then
+        log.info("ignoring " .. tostring(gesture.kind) .. " -- screen is locked")
+        return
+    end
+
     if gesture.kind == "tap" then
         handle_tap(gesture.x, gesture.y)
     elseif gesture.kind == "swipe" then
@@ -789,6 +906,11 @@ while true do
         local poll_entries = {}
         if touch_reader then
             poll_entries[#poll_entries + 1] = { fd = touch_reader.fd }
+        end
+        -- The power button is polled even while locked -- it is the ONLY
+        -- way back, so it must never be gated on the lock state.
+        if key_reader then
+            poll_entries[#poll_entries + 1] = { fd = key_reader.fd }
         end
         if conn then
             poll_entries[#poll_entries + 1] = { fd = conn.fd, want_write = conn:wants_write() }
@@ -838,6 +960,38 @@ while true do
                     local gestures = touch_reader:feed(bytes)
                     for _, gesture in ipairs(gestures) do
                         handle_gesture(gesture)
+                    end
+                end
+            end
+        end
+
+        -- --- power button ---
+        if key_reader then
+            local r = results[key_reader.fd]
+            if r and r.readable then
+                local bytes, kerr = posix.read_available(key_reader.fd)
+                if bytes == nil then
+                    log.warn("keys: read error " .. tostring(kerr) .. " -- closing and retrying")
+                    key_reader:close()
+                    local reopened, reopen_err = keys.open(power_key_path, log)
+                    key_reader = reopened
+                    if not reopened then
+                        log.error("keys: could not reopen " .. tostring(power_key_path) ..
+                            " (" .. tostring(reopen_err) .. ") -- the power button will no " ..
+                            "longer lock/unlock the screen for the rest of this run. If the " ..
+                            "screen is currently locked, restart the dashboard to get it back.")
+                    end
+                elseif bytes ~= "" then
+                    for _, ev in ipairs(key_reader:feed(bytes)) do
+                        -- Act on RELEASE, not press. Two reasons: it's
+                        -- the conventional edge for a toggle, and this
+                        -- PMIC also has a separate long-press
+                        -- "manual reset" line that powers the device off
+                        -- -- triggering on press would fire the toggle
+                        -- on the way into a deliberate power-off too.
+                        if ev.code == keys.KEY_POWER and ev.value == "release" then
+                            set_screen_locked(not screen_locked, "power button")
+                        end
                     end
                 end
             end
@@ -938,8 +1092,14 @@ while true do
         -- even when the user is sitting on the Learning screen.
         if flash_expire_at_ms ~= nil and now_ms() >= flash_expire_at_ms then
             flash_expire_at_ms = nil
+            -- Also gated on the lock, and note this one does NOT go
+            -- through redraw() -- ui.clear_flash_message() paints the nav
+            -- bar strip directly, so redraw()'s own lock guard would not
+            -- catch it. Without this check, a toast that happened to be
+            -- on screen when the user locked would, three seconds later,
+            -- stamp a nav bar across the blank screen.
             local active_tab = UI_MODE_TAB[ui_mode]
-            if active_tab then
+            if active_tab and not screen_locked then
                 ui.clear_flash_message(active_tab)
             end
         end
@@ -958,7 +1118,12 @@ while true do
         -- repaints and flushes just the header corner, the same
         -- partial-refresh treatment the toast dismissal already gets,
         -- rather than flashing the entire screen for two digits.
-        if (now_ms() - last_battery_poll_ms) >= BATTERY_POLL_INTERVAL_MS then
+        -- Skipped entirely while locked. Not just the drawing -- the READ
+        -- too, so the CPU isn't woken to open a sysfs file for a number
+        -- nobody can see. Same for the clock tick below. Suppressing this
+        -- work is the actual power saving; the blank screen itself costs
+        -- nothing either way on e-ink.
+        if not screen_locked and (now_ms() - last_battery_poll_ms) >= BATTERY_POLL_INTERVAL_MS then
             last_battery_poll_ms = now_ms()
             local fresh = battery.read()
             if fresh ~= battery_percent then
@@ -983,7 +1148,15 @@ while true do
         end
 
         -- --- periodic clock redraw ---
-        if (now_ms() - last_clock_redraw_ms) >= config.clock_redraw_interval_ms then
+        -- The `not screen_locked` test is load-bearing, not just an
+        -- optimisation. redraw() suppresses itself while locked and
+        -- returns WITHOUT updating last_clock_redraw_ms -- so without
+        -- this guard the condition below would stay true forever and
+        -- fire on every single loop iteration (~500ms), spamming the log
+        -- and burning CPU for the entire time the screen is locked,
+        -- which is the exact opposite of what locking is for.
+        if not screen_locked
+            and (now_ms() - last_clock_redraw_ms) >= config.clock_redraw_interval_ms then
             redraw_if_dashboard("periodic clock tick")
         end
     end)
