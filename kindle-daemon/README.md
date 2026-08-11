@@ -110,12 +110,99 @@ framing) traded for one fewer thing that can break on a KOReader upgrade.
 
 ---
 
+## Screens
+
+`src/daemon.lua` owns a `ui_mode` state machine; `src/ui.lua` owns all
+drawing and layout and stays a pure "given this state, draw these pixels
+and return hit_zones" renderer.
+
+| `ui_mode`      | Screen                | Nav tab    |
+|----------------|-----------------------|------------|
+| `dashboard`    | Today: tasks, Claude usage card, footer controls | Today |
+| `learning`     | Learning: courses + books, progress bars | Learning |
+| `keyboard`     | Add Task on-screen keyboard | (none) |
+| `confirm_exit` | Exit Dashboard confirmation | (none) |
+
+The bottom nav bar's tabs are Today / Learning / Habits / Home. Today and
+Learning are real screens and switch instantly; Habits and Home are still
+stubs that raise a "coming soon" toast. `ui.NAV_TAB_IMPLEMENTED` is what
+decides which is which, and it also drives the bar's three visual states:
+active (inverted black), available (plain black text), unavailable
+(gray).
+
+### The Learning screen
+
+A dedicated full screen listing what you're working through -- online
+courses (you set the percentage) and books (you record the page, the
+percentage is worked out for you). It shows *only* learnings: no tasks,
+no usage card, no footer controls.
+
+It is **read-only on the device, deliberately.** Every learning edit
+needs a number, and the on-screen keyboard is lowercase letters and space
+only -- it has no digits at all. Rather than build a numeric keypad,
+Telegram owns all learning mutation (`/course`, `/book`, `/percent`,
+`/page`, `/total` -- see `backend/telegram_bot.py`). Consequently item
+rows register no hit zone: a registered-but-inert tap target is worse
+than none, because the user taps, nothing happens, and they learn to
+distrust the surface.
+
+Each row draws from four fields the backend has already derived -- `name`,
+`percent`, `detail`, `done` -- so nothing on the device branches on
+whether an item is a course or a book, and nothing divides. A book is
+simply a row whose `detail` is non-empty, and that string doubles as the
+type signal, which is why there's no separate badge or icon. See
+`backend/README.md`'s field notes and `_recompute` in `backend/state.py`.
+
+### Paging and swiping
+
+Both list screens paginate rather than scroll (e-ink can't scroll
+smoothly, and every redraw is a visible flash). Two ways to move:
+
+- **The pager row**: a previous arrow, directly tappable page numbers,
+  and a next arrow. Page 1 and the last page are always present in the
+  strip, so from anywhere in a long list either end is one tap away; the
+  middle window slides. Arrows at the ends are drawn gray and register no
+  hit zone -- they disable rather than wrap, because a "previous" that
+  jumps to the last page is a trap once real page numbers are visible.
+- **Swiping** left/right anywhere over the list. `src/touch.lua`
+  classifies each down-up gesture as a tap, a directional swipe, or an
+  ambiguous "drag" by comparing where the finger landed against where it
+  lifted. The drag case matters: before classification existed, any long
+  drag registered as a tap wherever the finger came up, so a sloppy
+  gesture across the task list could toggle or arm deletion on whatever
+  row it ended on. Vertical swipes and diagonal smears are now
+  deliberately inert.
+
+  Swipes hit-test against where the gesture *started*, since a swipe can
+  easily release outside the region it began in, and direction is
+  computed *after* the screen transform, so `swap_xy`/`invert_*` can't
+  produce a page turn that goes the opposite way from the user's thumb.
+
+### The battery indicator
+
+Top-right of the header, on the clock's row. `src/battery.lua` probes a
+ranked list of battery sources once at startup, caches whichever worked,
+and reads only that one afterwards -- re-walking the chain every poll
+would let one transient error silently and permanently demote the daemon
+to a worse source.
+
+Note the device naming trap documented at the top of that file: this
+Kindle (7th gen, WP63GW, KT2) is the **wario** platform, so the native
+path is `wario_battery` -- not `yoshi_battery` (i.MX50 Kindles) and not
+`bd7181x_bat` (the 8th-gen KT3, which KOReader confusingly calls
+"KindleBasic2" while this device is "KindleBasic").
+
+If every source fails, the UI draws a gray battery and `--%` rather than
+hiding the indicator or falling back to a number. A stale-but-plausible
+percentage never looks broken, so it would never get investigated; a
+visible dash does. `tools/battery_probe.sh` dumps what the device really
+exposes.
+
 ## On-device controls (Exit Dashboard, Restart SSH, Add/Delete Task)
 
 Beyond the read-only Today view described above, the dashboard has four
 pieces of interactive UI, all handled by `src/daemon.lua`'s `ui_mode`
-state machine (`"dashboard"` / `"keyboard"` / `"confirm_exit"`) dispatch
-in `handle_tap`, with all drawing/layout owned by `src/ui.lua` as usual:
+dispatch in `handle_tap`, with all drawing/layout owned by `src/ui.lua`:
 
 - **Exit Dashboard.** A small button in the row directly above the nav
   bar. Tapping it does NOT immediately act -- it switches to a dedicated
@@ -163,12 +250,12 @@ in `handle_tap`, with all drawing/layout owned by `src/ui.lua` as usual:
   down/up detection (no long-press), which is exactly why this is a
   two-single-taps pattern rather than a press-and-hold.
 
-None of the pixel-centering inside the on-screen keyboard's key labels
-has been measured against real hardware (there was no confirmed
-per-glyph width figure to build on, only the confirmed 8px/unit *text
-height* this file's header comment already established) -- see
-`KBD_CHAR_W_ESTIMATE` in `src/ui.lua` if key labels look visibly
-off-center once this is actually running on the device.
+Horizontal centering of text (the keyboard's key labels, the pager's page
+numbers) depends on the per-glyph width at sizes above 1, which is
+extrapolated from the confirmed 8px-at-size-1 measurement rather than
+measured directly. All of it now goes through one `char_w()` helper in
+`src/ui.lua` -- adjust that if labels look visibly off-center on the
+device, and every screen corrects at once.
 
 ---
 
@@ -240,17 +327,32 @@ couple of points are genuinely still device-specific and worth checking on
 5. **Timing/CPU behavior**: CONFIRMED responsive enough in extended real
    use -- the chosen `clock_redraw_interval_ms` and per-tap redraw
    approach doesn't feel sluggish on the reference device.
-6. **On-screen keyboard key-label centering** (`src/ui.lua`,
-   `KBD_CHAR_W_ESTIMATE`) -- still a genuine estimate (12px), not
-   confirmed on hardware. Worth noting: the *card* section's analogous
-   glyph-width constant (`CARD_CHAR_W_S1`) was also an unconfirmed guess
-   until it was actually measured via `fbink -E` and turned out to be
-   noticeably off (visibly misaligned text was the tell) -- so treat this
-   keyboard one as likely wrong too until someone runs the same
-   measurement for size=2. Worst case here is purely cosmetic (labels
-   look slightly off-center), never a functional problem -- the tap
-   zones themselves are exact regardless of where the label text is
-   drawn inside them.
+6. **Glyph width above size 1** (`src/ui.lua`, `char_w()`) -- extrapolated
+   from the confirmed 8px-at-size-1 measurement (FBInk scales its built-in
+   font by whole-number multiples, the same reason text *height* is a
+   clean 8px per size unit), but not itself measured. Confirm with
+   `fbink -E -S 2 "100%"`. This file previously carried a second,
+   contradictory constant for the same quantity (`KBD_CHAR_W_ESTIMATE =
+   12`, predating the size-1 measurement); the two have been unified, so
+   a correction now lands in one place. Worst case is purely cosmetic
+   (labels look slightly off-center, right-aligned text sits a few pixels
+   off) -- tap zones are exact regardless of where label text lands
+   inside them.
+7. **Swipe distance thresholds** (`src/touch.lua`, `SWIPE_MIN_PX` /
+   `SWIPE_AXIS_RATIO`) -- reasoned from the screen geometry (60px = 10%
+   of the screen width, comfortably above an IR panel's jitter and well
+   below a deliberate tap's slop), not measured against a real thumb on
+   this panel. `tools/tap_test.lua` prints the classification and the raw
+   travel for every gesture specifically so these can be checked. The
+   classification arithmetic itself *is* covered, offline, by
+   `tests/test_gestures.lua`.
+8. **Which battery path this firmware exposes** (`src/battery.lua`) --
+   the ranked source list is built from what the wario platform is
+   documented to provide, but which nodes exist on your specific build is
+   unconfirmed. This is handled by design rather than by assumption: the
+   daemon probes the whole chain at startup, logs which source it settled
+   on, and renders an explicit `--%` if none worked.
+   `tools/battery_probe.sh` dumps the real state of every candidate.
 
 None of the above being wrong should be able to brick anything -- worst
 case is "the dashboard doesn't draw right" or "taps don't register" or
@@ -269,20 +371,41 @@ kindle-daemon/
   src/
     daemon.lua            -- main entry point / event loop
     posix.lua             -- FFI bindings: raw TCP sockets, evdev reads, poll()
-    touch.lua             -- touch device auto-detect + tap parsing
+    touch.lua             -- touch device auto-detect + gesture parsing
+                              (tap / swipe / inert drag)
+    battery.lua           -- battery percentage: ranked source probe,
+                              cached winner, explicit "unknown" on failure
     websocket.lua         -- minimal RFC 6455 client (text frames only)
     sha1.lua              -- pure-Lua SHA-1 (WebSocket handshake only)
     base64.lua            -- pure-Lua base64 encode (handshake only)
     json.lua              -- minimal JSON encode/decode
-    ui.lua                -- dashboard rendering via the `fbink` CLI
+    ui.lua                -- all screen rendering via the `fbink` CLI
     log.lua               -- simple size-capped file logger
   bin/
     run.sh                -- launcher used by both manual tests and upstart
-  tools/
+  tests/                  -- run these on your LAPTOP with luajit; they need
+                             no device and no network
+    test_gestures.lua      -- tap/swipe/drag classification, incl. the screen
+                              transform and gestures split across reads
+    test_layout.lua        -- renders every screen with a recorder in place of
+                              fbink, then checks nothing is drawn off-screen,
+                              no tap targets overlap or fall under 40px, and
+                              the pager's windowing rules hold
+    test_hit_resolution.lua -- runs daemon.lua's own tap/gesture resolution over
+                              real hit zones at concrete pixel coordinates.
+                              Covers the gap test_layout.lua leaves: the layout
+                              can be perfectly self-consistent while the
+                              CONSUMER resolves a tap to the wrong zone (which
+                              is exactly how the full-region swipe zone once
+                              swallowed every tap on the Today screen)
+  tools/                  -- run these ON THE DEVICE over SSH
     evtest.lua            -- standalone raw touch-event dumper (manual test)
-    tap_test.lua           -- exercises touch.lua's real tap-detection logic,
+    tap_test.lua           -- exercises touch.lua's real gesture detection,
                               not just the raw dump -- useful after any change
-                              to touch.lua, or bringing up a new touch panel
+                              to touch.lua, when bringing up a new touch panel,
+                              or to check the swipe thresholds feel right
+    battery_probe.sh       -- dumps every battery interface this device really
+                              exposes; use it if the battery reads "--%"
     fbink_selftest.sh      -- standalone pixel-coordinate calibration test
   install/
     kindle-dashboard.conf  -- upstart job (optional boot-autostart, see

@@ -2,10 +2,13 @@
 
 Always-on local service that runs on your Windows laptop. It:
 
-1. Runs the Telegram bot (`/add`, `/list`, `/done`, `/delete`, `/help`) from a single
-   authorized chat, same as the v1 prototype.
+1. Runs the Telegram bot from a single authorized chat -- tasks (`/add`, `/done`,
+   `/delete`), learning progress (`/course`, `/book`, `/percent`, `/page`, `/total`),
+   plus `/list` and `/help`. See `telegram_bot.py` for the full command surface and
+   the parsing conventions behind it.
 2. Polls the Anthropic Admin API every 15 minutes for today's total token usage.
-3. Persists all state (tasks + Claude usage) to a local JSON file, atomically.
+3. Persists all state (tasks + learnings + Claude usage) to a local JSON file,
+   atomically.
 4. Pushes state to the Kindle daemon over a persistent **WebSocket** (`/ws`) instead of
    the Kindle polling a third party (jsonbin) -- this replaces jsonbin.io entirely.
 5. Accepts actions **from** the Kindle over that same WebSocket (e.g. tapping a
@@ -124,6 +127,13 @@ it last received; there is no incremental diffing.
     {"id": 1, "text": "Buy milk", "done": false},
     {"id": 2, "text": "Write handoff doc", "done": true}
   ],
+  "learnings": [
+    {"id": 1, "kind": "book", "name": "Atomic Habits", "percent": 37,
+     "detail": "120/320 pages", "done": false,
+     "pages_read": 120, "total_pages": 320},
+    {"id": 2, "kind": "course", "name": "Spanish", "percent": 40,
+     "detail": "", "done": false, "pages_read": 0, "total_pages": 0}
+  ],
   "claude_usage": {
     "tokens_today": 128340,
     "last_updated": "2026-07-30T14:32:10.482193+00:00"
@@ -143,6 +153,28 @@ Field notes:
 - `tasks[].id`: integer, stable, unique. Never reused after a delete -- new tasks get
   `max(existing_ids) + 1` (or `1` if the list is empty).
 - `tasks[].done`: boolean.
+- `learnings`: array of things you're working through -- online courses and books.
+  Its own id sequence, completely independent of `tasks` (there can be both a task
+  `#1` and a learning `L1`). Shown as `L<id>` in every Telegram reply and on the
+  Kindle, so the two namespaces stay visibly distinct; the `L` is never stored.
+- `learnings[].kind`: `"course"` or `"book"`. **The Kindle renderer never reads this.**
+  It exists so the Telegram bot can route `/page` vs `/percent` and reject the wrong
+  one with a message naming the right command.
+- `learnings[].name`: string, capped at the same 500 chars as task text.
+- `learnings[].percent`: integer 0-100. For a course this is what the user set with
+  `/percent`; for a book it is derived as `pages_read * 100 // total_pages`.
+- `learnings[].detail`: pre-formatted caption -- `""` for a course, `"120/320 pages"`
+  for a book. Computed server-side for the same reason as `session_usage.resets_label`:
+  so the Kindle draws a row from `name`/`percent`/`detail`/`done` with no branching on
+  `kind`, no division, and no divide-by-zero risk on a device with no way to show a
+  traceback.
+- `learnings[].done`: boolean, always exactly `percent == 100`. The percent derivation
+  uses integer **floor** division specifically so this holds for books too -- with
+  rounding, page 319 of 320 would display as 100% while `done` stayed false.
+- `learnings[].pages_read` / `learnings[].total_pages`: integers, books only (`0` on
+  courses). Bot-side bookkeeping; the renderer never reads them. `total_pages` is
+  guaranteed >= 1 for books by validation at the command layer, and `pages_read` is
+  clamped to it on every write, so an impossible value is never persisted.
 - `claude_usage.tokens_today`: integer, total input+output tokens for the current UTC
   day. `0` until the first successful poll, or if usage tracking is disabled (no
   admin key configured).
@@ -180,6 +212,14 @@ stays open.
 | `toggle_task`   | `id` (integer)            | Flips that task's `done` flag (the checkbox-tap case). |
 | `delete_task`   | `id` (integer)            | Removes that task entirely.                   |
 | `refresh_usage` | none                      | Forces an immediate `session_usage` re-fetch instead of waiting for the next scheduled poll. Rate-limited server-side: one real fetch per `MIN_MANUAL_REFRESH_INTERVAL_SECONDS` (10s) and at most `MAX_MANUAL_REFRESHES_PER_HOUR` (20) -- see `claude_session_usage.py`. Either limit rejects with a `refresh_failed` error instead of hitting claude.ai again. |
+
+**There are deliberately no learning actions.** `learnings` is push-only: the Kindle
+displays it and never mutates it. Every learning edit needs a *number* (a percentage,
+a page), and the device's on-screen keyboard is lowercase letters plus space -- it has
+no digits at all (see `kindle-daemon/src/ui.lua`'s keyboard section). Rather than
+build a numeric keypad for a device that already has a perfectly good text-input
+channel, Telegram owns all learning mutation. If that ever changes, the actions to add
+are the direct analogues of the `StateStore.set_learning_*` methods.
 
 **Examples:**
 

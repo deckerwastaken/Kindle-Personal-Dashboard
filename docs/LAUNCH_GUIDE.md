@@ -107,7 +107,15 @@ adapter (looks like `192.168.1.xxx`). You should see `{"status":"ok"}`.
 > Then try the phone test again.
 
 Try messaging your bot on Telegram: `/add test task`, then `/list` — it should reply
-with your task. If that works, close this window (Ctrl+C) and move to the next step.
+with your task. Send `/help` to see everything it understands; typing `/` on your
+phone also pops up a menu of every command, so you never have to memorise them.
+
+To try the learning tracker: `/course Spanish` adds a course, `/percent L1 40` sets it
+to 40%. `/book Atomic Habits 320` adds a book, `/page L2 120` records what page you're
+on and works the percentage out for you. Tasks are numbered `#1 #2`, learning items
+`L1 L2`, so the two never get mixed up.
+
+If that works, close this window (Ctrl+C) and move to the next step.
 
 ### 1.4 Make it start automatically
 
@@ -186,10 +194,17 @@ things worth knowing up front:
    cd /mnt/us/kindle-daemon/bin
    sh run.sh
    ```
-   You should see the dashboard: time/date, your tasks, a Claude usage card, and a
-   bottom nav bar. It should say `ONLINE` within a few seconds. Tap a checkbox — it
-   should toggle. Send `/add something` on Telegram — it should appear on screen without
-   you touching anything. Let it run a few minutes, then Ctrl+C.
+   You should see the dashboard: time/date, a battery percentage in the top-right,
+   your tasks, a Claude usage card, and a bottom nav bar. It should say `ONLINE`
+   within a few seconds. Tap a checkbox — it should toggle. Send `/add something` on
+   Telegram — it should appear on screen without you touching anything. Tap the
+   **Learning** tab at the bottom to see your courses and books, and **Today** to come
+   back. Let it run a few minutes, then Ctrl+C.
+
+   If the battery shows a gray `--%`, the dashboard couldn't read this Kindle's battery
+   level and is saying so honestly rather than showing a made-up number. Everything
+   else still works; see "Battery shows `--%`" in `kindle-daemon/INSTALL.md` for the
+   one-command fix.
 8. **Set up on-demand start/stop from your laptop (the recommended day-to-day way to
    use this)** — once step 7 worked cleanly, you don't need to keep an SSH terminal
    open every time. Full reference: `kindle-daemon/ops/README.md`. Short version: turn

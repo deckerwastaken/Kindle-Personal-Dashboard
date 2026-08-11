@@ -43,8 +43,25 @@ local websocket = require("websocket")
 local touch = require("touch")
 local json = require("json")
 local ui = require("ui")
+local battery = require("battery")
 
 ui.init(config.fbink_path, log)
+
+-- Probe the battery once at startup and cache whichever source worked
+-- (see src/battery.lua for the ranked chain and why it's probed once
+-- rather than per read). nil here just means "unknown" -- the UI renders
+-- that state explicitly and the dashboard is fully usable without it.
+local battery_percent = battery.init(log)
+local last_battery_poll_ms = 0
+
+-- 60s. Kept as a local constant rather than a config.lua setting on
+-- purpose: config.lua is a file every existing install already has a
+-- copy of, so a new key added there would read as nil on every machine
+-- that hasn't re-copied config.example.lua -- a silent breakage for a
+-- value nobody needs to tune. The underlying gas gauge only updates on
+-- the order of tens of seconds anyway, so polling faster would return
+-- the identical integer.
+local BATTERY_POLL_INTERVAL_MS = 60 * 1000
 
 -- ===================== touch input setup =====================
 
@@ -60,15 +77,25 @@ if not touch_device_path then
     end
 end
 
+-- Screen-orientation transform for the touch panel, from config.lua.
+-- Held in a named local rather than inlined at the open() call because
+-- the main loop RE-OPENS the reader after a read error, and that reopen
+-- previously passed no transform at all -- so a device configured with
+-- swap_xy/invert_* would silently start reporting untransformed
+-- coordinates after one transient error. That now matters more than it
+-- used to: with gestures, a lost invert_x doesn't just misplace taps, it
+-- mirrors swipe DIRECTIONS, so page turns would start running backwards.
+local touch_transform = {
+    swap_xy = config.touch_swap_xy,
+    invert_x = config.touch_invert_x,
+    invert_y = config.touch_invert_y,
+    screen_w = 600,
+    screen_h = 800,
+}
+
 local touch_reader = nil
 if touch_device_path then
-    local tr, err = touch.open(touch_device_path, log, {
-        swap_xy = config.touch_swap_xy,
-        invert_x = config.touch_invert_x,
-        invert_y = config.touch_invert_y,
-        screen_w = 600,
-        screen_h = 800,
-    })
+    local tr, err = touch.open(touch_device_path, log, touch_transform)
     if tr then
         touch_reader = tr
     else
@@ -236,6 +263,10 @@ local current_hit_zones = {}
 local last_clock_redraw_ms = 0
 local task_page = 1 -- which page of tasks is showing; see ui.lua's
                      -- draw_dashboard doc comment for the pagination model
+local learning_page = 1 -- the same, for the Learning screen. Kept
+                         -- separate from task_page so switching tabs
+                         -- back and forth doesn't reset where you were
+                         -- in the other list.
 
 -- UI mode: which screen is currently on the e-ink display and therefore
 -- which set of hit_zones current_hit_zones holds. daemon.lua is the sole
@@ -243,9 +274,24 @@ local task_page = 1 -- which page of tasks is showing; see ui.lua's
 -- pure "given this state, draw these pixels and return hit_zones"
 -- renderer, matching the existing separation of concerns in this file.
 --   "dashboard" -- the normal Today view (default)
+--   "learning"  -- the Learning list (courses + books), reached from the
+--                  nav bar. Read-only on the device: every learning
+--                  edit needs a number, and the on-screen keyboard has
+--                  no digits, so Telegram owns all mutation.
 --   "keyboard"  -- the on-screen keyboard for the Add Task flow
 --   "confirm_exit" -- the Exit Dashboard confirmation screen
 local ui_mode = "dashboard"
+
+-- Which nav tab each ui_mode corresponds to. Only the two screens that
+-- actually draw a nav bar appear here; the keyboard and exit-confirm
+-- screens draw none, and nil is the right answer for them (see the
+-- toast-dismiss path, which must not paint a nav bar over a screen that
+-- doesn't have one).
+local UI_MODE_TAB = { dashboard = "Today", learning = "Learning" }
+
+-- Which ui_mode a nav tab switches to, for the tabs that are real
+-- screens. Anything absent is still a "coming soon" stub.
+local TAB_UI_MODE = { Today = "dashboard", Learning = "learning" }
 
 -- Add Task flow state (only meaningful while ui_mode == "keyboard").
 local keyboard_buffer = ""
@@ -266,8 +312,10 @@ local function redraw(reason)
             return ui.draw_keyboard(keyboard_buffer)
         elseif ui_mode == "confirm_exit" then
             return ui.draw_confirm_exit()
+        elseif ui_mode == "learning" then
+            return ui.draw_learning(current_state, conn_status, learning_page, battery_percent)
         else
-            return ui.draw_dashboard(current_state, conn_status, task_page, armed_delete_id)
+            return ui.draw_dashboard(current_state, conn_status, task_page, armed_delete_id, battery_percent)
         end
     end)
     if ok then
@@ -279,6 +327,8 @@ local function redraw(reason)
             -- page that no longer exists. Not meaningful for the other
             -- ui_modes, which don't return a second value.
             task_page = effective_page or task_page
+        elseif ui_mode == "learning" then
+            learning_page = effective_page or learning_page
         end
         last_clock_redraw_ms = now_ms()
     else
@@ -303,13 +353,96 @@ local function redraw_if_dashboard(reason)
     end
 end
 
+--- Like redraw_if_dashboard(), but for changes that affect EVERY screen
+--- which renders backend state -- currently the dashboard and the
+--- Learning list. A fresh state push changes the learning list just as
+--- much as it changes the task list, and the connection badge is drawn
+--- on both, so gating those on "dashboard only" would leave the Learning
+--- screen showing stale progress with no indication anything was wrong.
+---
+--- Kept as a SEPARATE helper from redraw_if_dashboard rather than
+--- widening that one, because the two remaining callers of the narrower
+--- version are genuinely dashboard-only concerns: the periodic clock
+--- tick (the Learning screen has no clock, so redrawing it on that
+--- timer would be a full-screen e-ink flash for a pixel that didn't
+--- change) and the delete-confirmation expiry (an armed task delete
+--- only exists on the dashboard).
+local function redraw_if_showing_state(reason)
+    if ui_mode == "dashboard" or ui_mode == "learning" then
+        redraw(reason)
+    end
+end
+
+local function zone_contains(z, x, y)
+    return x >= z.x and x < z.x + z.w and y >= z.y and y < z.y + z.h
+end
+
+--- Zone kinds that describe a GESTURE REGION rather than a tap target.
+---
+--- These deliberately span whole areas ON TOP OF the individual tap
+--- targets inside them -- the task-list swipe area contains every task
+--- row, its delete zones, the pager and the "+ Add Task" row. They must
+--- therefore be invisible to tap resolution, or the first one registered
+--- swallows every tap in its band.
+---
+--- This is not hypothetical. Without this exclusion, `task_swipe_area`
+--- was hit_zones[1] and the ENTIRE Today task area went inert the moment
+--- the first state snapshot arrived: checkboxes, per-row delete, the
+--- pager, and "+ Add Task" all resolved to the swipe zone, which no tap
+--- handler has a branch for, so every one of them silently did nothing.
+--- Only the footer and nav bar (below the region) still responded.
+---
+--- Filtering by kind here, rather than relying on registration ORDER, is
+--- deliberate: ordering would work but would make the position of one
+--- table insert load-bearing and unremarked, which is how this broke in
+--- the first place.
+local GESTURE_ZONE_KINDS = {
+    task_swipe_area = true,
+    learning_swipe_area = true,
+}
+
+--- Resolves a TAP: the first non-gesture zone containing the point.
 local function hit_test(x, y)
     for _, z in ipairs(current_hit_zones) do
-        if x >= z.x and x < z.x + z.w and y >= z.y and y < z.y + z.h then
+        if not GESTURE_ZONE_KINDS[z.kind] and zone_contains(z, x, y) then
             return z
         end
     end
     return nil
+end
+
+--- Resolves a GESTURE: finds a zone of a specific kind containing
+--- (x, y), ignoring the tap targets that overlap it. The mirror image of
+--- hit_test above -- between them, tap targets and gesture regions can
+--- freely overlap in both directions without either lookup interfering
+--- with the other.
+local function find_zone_by_kind(kind, x, y)
+    for _, z in ipairs(current_hit_zones) do
+        if z.kind == kind and zone_contains(z, x, y) then
+            return z
+        end
+    end
+    return nil
+end
+
+--- Bottom nav bar taps, shared by every screen that draws one. Declared
+--- before the per-screen tap handlers below because Lua locals must
+--- exist before they're referenced -- there is no hoisting.
+local function handle_nav_tap(zone)
+    local target_mode = TAB_UI_MODE[zone.name]
+    if not target_mode then
+        show_flash(zone.name .. " is coming soon.")
+        return
+    end
+    if target_mode == ui_mode then
+        -- Already here. Deliberately silent: a redraw would cost a
+        -- full-screen e-ink flash to produce the identical screen, and a
+        -- toast saying "you're already on this tab" is noise for
+        -- something the highlighted tab already shows.
+        return
+    end
+    ui_mode = target_mode
+    redraw("switched to the " .. zone.name .. " tab")
 end
 
 local function handle_dashboard_tap(zone)
@@ -390,9 +523,20 @@ local function handle_dashboard_tap(zone)
         armed_delete_until_ms = now_ms() + DELETE_CONFIRM_WINDOW_MS
         log.info("delete armed for task id=" .. tostring(zone.id))
         redraw("delete armed")
-    elseif zone.kind == "see_more_tasks" then
-        task_page = zone.next_page
-        redraw("see more tasks tapped")
+    elseif zone.kind == "page_prev" or zone.kind == "page_next" or zone.kind == "page_goto" then
+        -- One handler for all three pager controls: ui.lua already
+        -- resolved each of them to a concrete destination page and
+        -- refused to emit a zone at all for a move that isn't possible
+        -- (a disabled end arrow, or the current page's own cell), so
+        -- there is nothing left to validate or clamp here.
+        --
+        -- zone.target says WHICH paged list was tapped, so the same
+        -- control can be reused on other screens without this branch
+        -- having to guess.
+        if zone.target == "tasks" then
+            task_page = zone.page
+            redraw("jumped to task page " .. tostring(zone.page))
+        end
     elseif zone.kind == "add_task_button" then
         keyboard_buffer = ""
         ui_mode = "keyboard"
@@ -416,11 +560,29 @@ local function handle_dashboard_tap(zone)
             show_flash("Not connected -- can't refresh right now")
         end
     elseif zone.kind == "nav_tab" then
-        if zone.name == "Today" then
-            -- already the active tab, nothing to do
-        else
-            show_flash(zone.name .. " is coming soon.")
+        handle_nav_tap(zone)
+    end
+end
+
+--- The Learning screen is READ-ONLY on the device, deliberately: every
+--- edit a learning supports needs a number (a percentage, a page), and
+--- the on-screen keyboard is lowercase letters and space only -- it has
+--- no digits at all. So there is no "+ Add" affordance to tap here and
+--- no per-row action; Telegram owns all mutation.
+---
+--- That also means item rows register no hit zone at all. A registered
+--- but inert zone would be worse than none: the user taps, gets either a
+--- redraw flash or nothing, and learns not to trust the surface.
+local function handle_learning_tap(zone)
+    if not zone then return end
+
+    if zone.kind == "page_prev" or zone.kind == "page_next" or zone.kind == "page_goto" then
+        if zone.target == "learning" then
+            learning_page = zone.page
+            redraw("jumped to learning page " .. tostring(zone.page))
         end
+    elseif zone.kind == "nav_tab" then
+        handle_nav_tap(zone)
     end
 end
 
@@ -526,8 +688,92 @@ local function handle_tap(x, y)
         handle_keyboard_tap(zone)
     elseif ui_mode == "confirm_exit" then
         handle_confirm_exit_tap(zone)
+    elseif ui_mode == "learning" then
+        handle_learning_tap(zone)
     else
         handle_dashboard_tap(zone)
+    end
+end
+
+--- Swipe handling. Only the two paged list screens react to swipes: the
+--- keyboard and exit-confirm screens have no paged content, and silently
+--- doing nothing there is better than inventing a gesture (a "swipe to
+--- cancel" nobody asked for) on the two screens where a wrong guess is
+--- most costly.
+---
+--- Direction mapping follows the page-turn convention every e-reader
+--- (including this device's own stock reader) already uses: swiping LEFT
+--- drags the current page off to the left, revealing the NEXT one, and
+--- swiping right goes back. Matching what the user's thumb already
+--- expects from reading books on this exact hardware matters more here
+--- than any abstract argument about direction.
+---
+--- Deliberately CLAMPS at the ends rather than wrapping, even though the
+--- old "See more tasks" button wrapped: a wrap is fine for a single
+--- button whose whole job is "show me another page", but with numbered
+--- pages now visible, jumping 5 -> 1 on a swipe reads as a glitch. At an
+--- end, this does nothing at all -- no redraw, so no e-ink flash for a
+--- gesture that changed nothing.
+local function handle_swipe(gesture)
+    if gesture.dir ~= "left" and gesture.dir ~= "right" then
+        -- Vertical swipes are classified by touch.lua but unused here:
+        -- both lists paginate rather than scroll, so there is nothing
+        -- for an up/down gesture to mean. Swallowing it is the point --
+        -- before gesture classification existed, that same finger
+        -- movement landed as a tap and could toggle a task.
+        return
+    end
+
+    local zone_kind, current_page
+    if ui_mode == "dashboard" then
+        zone_kind, current_page = "task_swipe_area", task_page
+    elseif ui_mode == "learning" then
+        zone_kind, current_page = "learning_swipe_area", learning_page
+    else
+        return
+    end
+
+    -- Hit-tested against where the swipe STARTED, not where it ended: a
+    -- swipe that begins on the list and travels 200px can easily release
+    -- outside it, and the user's intent is set by where they put their
+    -- finger down.
+    local area = find_zone_by_kind(zone_kind, gesture.start_x, gesture.start_y)
+    if not area then
+        log.info("swipe ignored: did not start on the list")
+        return
+    end
+
+    local total_pages = area.total_pages or 1
+    local new_page = current_page + ((gesture.dir == "left") and 1 or -1)
+    if new_page < 1 or new_page > total_pages then
+        log.info(string.format("swipe %s ignored: already at page %d of %d",
+            gesture.dir, current_page, total_pages))
+        return
+    end
+
+    if ui_mode == "dashboard" then
+        task_page = new_page
+    else
+        learning_page = new_page
+    end
+    redraw(string.format("swiped %s to page %d", gesture.dir, new_page))
+end
+
+--- Single entry point for everything touch.lua produces. Kept separate
+--- from handle_tap above so the tap path stays exactly as it was.
+local function handle_gesture(gesture)
+    if gesture.kind == "tap" then
+        handle_tap(gesture.x, gesture.y)
+    elseif gesture.kind == "swipe" then
+        log.info(string.format("swipe %s from (%d, %d) to (%d, %d)",
+            gesture.dir, gesture.start_x, gesture.start_y, gesture.x, gesture.y))
+        handle_swipe(gesture)
+    else
+        -- "drag": travelled too far to be a tap, too diagonally to be a
+        -- swipe. Intentionally inert -- see classify_gesture() in
+        -- touch.lua for why it's reported instead of dropped there.
+        log.info(string.format("ignoring %s gesture from (%d, %d) to (%d, %d)",
+            tostring(gesture.kind), gesture.start_x, gesture.start_y, gesture.x, gesture.y))
     end
 end
 
@@ -569,11 +815,29 @@ while true do
                 if bytes == nil then
                     log.warn("touch: read error " .. tostring(rerr) .. " -- closing and retrying")
                     touch_reader:close()
-                    touch_reader = touch.open(touch_device_path, log)
+                    -- Must pass touch_transform: without it the reopened
+                    -- reader would drop the panel's orientation settings
+                    -- and start reporting raw coordinates (and mirrored
+                    -- swipe directions) for the rest of the process's
+                    -- life. See touch_transform's definition above.
+                    local reopened, reopen_err = touch.open(touch_device_path, log, touch_transform)
+                    touch_reader = reopened
+                    if not reopened then
+                        -- Previously this silently assigned nil and touch
+                        -- stayed dead until the daemon was restarted,
+                        -- with nothing in the log explaining why the
+                        -- screen had stopped responding. It still stays
+                        -- dead (there's no retry timer), but at least the
+                        -- log now says so in as many words.
+                        log.error("touch: could not reopen " .. tostring(touch_device_path) ..
+                            " (" .. tostring(reopen_err) .. ") -- TOUCH IS NOW DISABLED for " ..
+                            "this run. The dashboard will keep displaying and updating, but " ..
+                            "taps will do nothing until it is restarted.")
+                    end
                 elseif bytes ~= "" then
-                    local taps = touch_reader:feed(bytes)
-                    for _, tap in ipairs(taps) do
-                        handle_tap(tap.x, tap.y)
+                    local gestures = touch_reader:feed(bytes)
+                    for _, gesture in ipairs(gestures) do
+                        handle_gesture(gesture)
                     end
                 end
             end
@@ -613,10 +877,10 @@ while true do
                         -- Not redraw() -- if the user is mid-typing on
                         -- the keyboard screen or looking at the exit
                         -- confirmation, a state push shouldn't yank them
-                        -- back to the dashboard or draw underneath
-                        -- whatever's currently on screen. See
-                        -- redraw_if_dashboard()'s doc comment above.
-                        redraw_if_dashboard("new state from backend")
+                        -- back or draw underneath whatever's currently
+                        -- on screen. See redraw_if_showing_state()'s doc
+                        -- comment above.
+                        redraw_if_showing_state("new state from backend")
                     else
                         log.warn("ws: failed to decode message as JSON: " .. tostring(decoded))
                     end
@@ -629,7 +893,7 @@ while true do
                 end
             end
             if conn_status ~= prev_status and conn_status ~= "open" then
-                redraw_if_dashboard("connection status changed to " .. conn_status)
+                redraw_if_showing_state("connection status changed to " .. conn_status)
             end
         elseif now_ms() >= next_reconnect_at then
             try_connect()
@@ -658,19 +922,63 @@ while true do
         -- a full, comparatively expensive GC16 dashboard redraw just to
         -- clear a toast) -- ui.clear_flash_message() only repaints the
         -- nav bar strip the toast overlaid, which is all that needs
-        -- restoring. Gated on ui_mode == "dashboard" for the same reason
-        -- armed-delete expiry doesn't fire outside dashboard mode: if the
-        -- user has since moved to the keyboard or exit-confirm screen,
-        -- calling ui.clear_flash_message() would incorrectly paint a nav
-        -- bar over whatever that screen is actually showing at that same
-        -- pixel region. In that case just clear the timer with nothing
-        -- drawn -- that other screen's own cancel/confirm paths already
-        -- do a full unconditional redraw() on the way back to the
-        -- dashboard, which naturally clears any stale toast pixels too.
+        -- restoring. Gated on the current screen actually HAVING a nav
+        -- bar: if the user has since moved to the keyboard or
+        -- exit-confirm screen, calling ui.clear_flash_message() would
+        -- incorrectly paint a nav bar over whatever that screen is
+        -- showing at that same pixel region. UI_MODE_TAB is nil for
+        -- exactly those two screens, which is what makes this the same
+        -- question as "which tab should be highlighted". In that case
+        -- just clear the timer with nothing drawn -- those screens' own
+        -- cancel/confirm paths already do a full unconditional redraw()
+        -- on the way back, which clears any stale toast pixels too.
+        --
+        -- The tab name is passed through rather than assumed: restoring
+        -- the bar without it would repaint "Today" as the active tab
+        -- even when the user is sitting on the Learning screen.
         if flash_expire_at_ms ~= nil and now_ms() >= flash_expire_at_ms then
             flash_expire_at_ms = nil
-            if ui_mode == "dashboard" then
-                ui.clear_flash_message()
+            local active_tab = UI_MODE_TAB[ui_mode]
+            if active_tab then
+                ui.clear_flash_message(active_tab)
+            end
+        end
+
+        -- --- periodic battery poll ---
+        -- Two separate rate limits here, doing two different jobs:
+        --   BATTERY_POLL_INTERVAL_MS gates how often we READ the battery.
+        --   The "did the number change" check gates how often we DRAW it.
+        -- The read is a cheap sysfs file open, but every draw is a
+        -- visible e-ink refresh, and this device's charge moves about 1%
+        -- per 15-30 idle minutes -- so polling each minute while only
+        -- repainting on a real change works out to a couple of tiny
+        -- refreshes an hour instead of one per minute.
+        --
+        -- Deliberately NOT a full redraw(): ui.draw_battery_only()
+        -- repaints and flushes just the header corner, the same
+        -- partial-refresh treatment the toast dismissal already gets,
+        -- rather than flashing the entire screen for two digits.
+        if (now_ms() - last_battery_poll_ms) >= BATTERY_POLL_INTERVAL_MS then
+            last_battery_poll_ms = now_ms()
+            local fresh = battery.read()
+            if fresh ~= battery_percent then
+                log.info("battery: " .. tostring(battery_percent) .. " -> " .. tostring(fresh))
+                battery_percent = fresh
+                -- Repaint on any screen that actually DRAWS the battery
+                -- into L.battery_region_* -- the dashboard and the
+                -- Learning screen both do, at identical coordinates. The
+                -- keyboard and exit-confirm screens don't draw a header
+                -- at all, so painting there would drop a battery glyph on
+                -- top of unrelated content.
+                --
+                -- UI_MODE_TAB is exactly the set of screens with a header
+                -- and a nav bar, so it answers this question too rather
+                -- than introducing a third list to keep in sync. The
+                -- value above is updated regardless, so any screen is
+                -- correct as soon as it's next drawn in full.
+                if UI_MODE_TAB[ui_mode] then
+                    ui.draw_battery_only(battery_percent)
+                end
             end
         end
 

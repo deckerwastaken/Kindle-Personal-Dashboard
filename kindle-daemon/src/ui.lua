@@ -148,6 +148,64 @@ M.LAYOUT = {
 
     nav_bar_h = 64,
     nav_tab_count = 4,
+
+    -- --- battery indicator (header, top-right, on the CLOCK's row) ---
+    -- Placed on the clock's row rather than the date/status row below it
+    -- because that row is the one piece of empty space in the header:
+    -- "14:30" is 5 glyphs at size 4 = 160px, ending at x=184, leaving
+    -- everything from there to the right margin unused. The date row
+    -- underneath is already spoken for by the connection status badge.
+    --
+    -- Everything here is anchored to the RIGHT margin and grows leftward,
+    -- so the percent text getting one character wider ("9%" -> "85%" ->
+    -- "100%") never moves the battery glyph itself.
+    battery_glyph_w = 36,  -- the body, excluding the terminal nub
+    battery_glyph_h = 20,
+    battery_nub_w = 4,
+    battery_nub_h = 8,
+    battery_border = 2,    -- outline thickness of the body
+    battery_font_size = 2,
+    -- pct <= this reads as "low". No hysteresis band: the usual reason
+    -- to add one is to stop a value oscillating across the threshold from
+    -- causing repeated repaints, but daemon.lua only repaints this
+    -- region when the percentage NUMBER changes -- and a value bouncing
+    -- 20/21/20 has already changed the digits, so the repaint happens
+    -- regardless and hysteresis would buy nothing but state.
+    battery_low_threshold = 20,
+
+    -- --- pagination control (replaces the old "See more tasks" row) ---
+    -- Occupies exactly one task_row_h slot, so the whole vertical budget
+    -- derived in max_visible_tasks' comment above (and
+    -- L.task_list_max_bottom_y, which depends on it) stays valid without
+    -- recomputation -- this control drops into the slot the plain "see
+    -- more" text row already occupied.
+    pager_arrow_btn_w = 56,  -- square-ish 56x56 tap targets, in the
+                              -- preferred 48-64 band rather than the 40
+                              -- minimum: these are the two controls that
+                              -- get hit repeatedly, on an IR panel whose
+                              -- calibration is still unconfirmed.
+    pager_cell_w = 48,       -- visual width of one page-number cell
+    pager_cell_h = 48,
+    pager_cell_gap = 8,
+    -- 7 number slots. 8 slots at 44px wide would consume the available
+    -- band exactly, but 44 sits under the 48px preferred tap size, and
+    -- the 8th slot buys nothing once windowing is in play (see
+    -- build_page_slots below) -- target size wins over tidier arithmetic.
+    pager_max_slots = 7,
+    pager_font_size = 2,
+
+    -- --- LEARNING screen (its own full screen, reached from the nav bar) ---
+    -- Shows courses and books only: no tasks, no usage card, no footer
+    -- controls. Same 56/8 row rhythm as the task list, so the two
+    -- screens feel like the same app.
+    learn_row_h = 56,
+    learn_row_gap = 8, -- = gap_xs
+    -- NOTE: learn_rows_per_page is NOT set here -- it is computed from
+    -- the geometry just below the table (currently 8). See there for why.
+    learn_name_font_size = 2,
+    learn_bar_h = 12,   -- the card's hero bar is 14; these stack 8 deep,
+                         -- and 12 keeps the page from reading as a barcode
+    learn_bar_top = 33, -- offset within the row, to the bar's OUTLINE
 }
 
 local L = M.LAYOUT
@@ -185,6 +243,74 @@ L.nav_y = L.screen_h - L.nav_bar_h -- top of the bottom nav bar strip
 -- mathematically identical to a value already proven not to collide with
 -- the footer (668 card-bottom vs. 680 footer_y, the same verified 12px
 -- margin as before), just no longer dependent on the actual task count.
+-- Battery geometry, computed once from the right margin, same
+-- "derive it here, reference it everywhere" treatment as footer_y above.
+-- L.battery_region_* is the rectangle draw_battery() owns outright: it
+-- erases exactly this before drawing, and daemon.lua partial-refreshes
+-- exactly this when only the battery changed. Width is sized to the
+-- widest possible content ("100%" at size 2 starting at x=456) plus a
+-- little slack, NOT hand-picked -- so it can't silently become too small
+-- if the font size here is ever bumped.
+L.battery_right_edge = L.screen_w - L.margin -- 576
+L.battery_body_x = L.battery_right_edge - L.battery_glyph_w - L.battery_nub_w
+L.battery_body_y = L.header_y + math.floor((8 * L.time_font_size - L.battery_glyph_h) / 2)
+L.battery_center_y = L.battery_body_y + math.floor(L.battery_glyph_h / 2)
+-- Right edge of the percent text. gap_sm (not gap_xs) of clearance to
+-- the glyph: at 8px, the low-battery badge below -- which extends 6px
+-- past the text -- would end 2px from the glyph outline, and two black
+-- shapes that close together read as one smudge on e-ink.
+L.battery_text_right = L.battery_body_x - L.gap_sm
+L.battery_text_y = L.battery_center_y - math.floor(8 * L.battery_font_size / 2)
+L.battery_region_x = L.battery_text_right - 4 * (8 * L.battery_font_size) - L.gap_xs
+L.battery_region_y = L.header_y
+L.battery_region_w = L.battery_right_edge - L.battery_region_x
+L.battery_region_h = 8 * L.time_font_size
+
+-- Pager geometry, computed once from the margins for the same reason as
+-- everything else in this block. The number band is whatever is left
+-- between the two arrow buttons, with gap_sm of breathing room on each
+-- side; the number strip is then CENTERED inside it (see draw_pager) so
+-- a 2-page pager doesn't leave a 300px void reading as a render failure.
+L.pager_cell_pitch = L.pager_cell_w + L.pager_cell_gap
+L.pager_left_arrow_x = L.margin
+L.pager_right_arrow_x = L.screen_w - L.margin - L.pager_arrow_btn_w
+L.pager_band_x = L.pager_left_arrow_x + L.pager_arrow_btn_w + L.gap_sm
+L.pager_band_w = L.pager_right_arrow_x - L.gap_sm - L.pager_band_x
+
+-- Learning screen geometry. The header deliberately lands on the SAME
+-- y-positions as the dashboard's -- a size-2 secondary line at L.date_y
+-- and the rule at L.divider_y -- so switching tabs doesn't visually
+-- jolt, and content on both screens begins at the same y.
+L.learn_title_y = L.margin
+L.learn_summary_y = L.date_y
+L.learn_row_first_y = L.divider_y + L.divider_h + L.gap_sm -- 122, = today_label_y
+L.learn_row_pitch = L.learn_row_h + L.learn_row_gap
+-- Pager pinned to the bottom, anchored UP from the nav bar, exactly like
+-- L.footer_y on the dashboard -- so it never moves as the item count
+-- changes, and hiding it (single page) moves nothing either.
+L.learn_pager_y = L.screen_h - L.nav_bar_h - L.gap_lg - L.task_row_h
+
+-- How many rows fit on one Learning page: COMPUTED from the space
+-- actually available between the first row and the pinned pager row,
+-- not hardcoded next to a comment claiming the arithmetic works out.
+-- Currently 8.
+--
+-- This is deliberately a derivation rather than a constant plus an
+-- assertion. An assertion here would have to live at module load, which
+-- daemon.lua does NOT wrap in pcall -- so a future edit that grew
+-- learn_row_h or moved the pager would stop the daemon from starting at
+-- all, and since upstart is configured to respawn it, the symptom on the
+-- device would be a boot loop against a blank screen with no way to read
+-- the error. That is a far worse outcome than the layout bug it would be
+-- catching. Computing the value instead makes the overflow impossible to
+-- express, so there is nothing left to assert.
+--
+-- (This file's history is why the question comes up at all: see
+-- max_visible_tasks' comment on the footer growing from 32 to 48px and
+-- silently creating a -4px overlap that a comment had claimed was fine.)
+L.learn_rows_per_page = math.floor(
+    (L.learn_pager_y - L.gap_lg - L.learn_row_first_y + L.learn_row_gap) / L.learn_row_pitch)
+
 L.task_list_max_bottom_y = L.task_row_first_y + (L.max_visible_tasks + 2) * (L.task_row_h + L.task_row_gap)
 L.usage_card_label_y = L.task_list_max_bottom_y + L.usage_card_gap_above
 L.usage_card_box_y = L.usage_card_label_y + 16 + L.gap_sm -- 16 = real size-2 label height
@@ -200,6 +326,30 @@ L.usage_card_box_y = L.usage_card_label_y + 16 + L.gap_sm -- 16 = real size-2 la
 -- pushed right-aligned text past its intended right edge instead of
 -- landing on it -- caught via live visual feedback on the device.
 local CARD_CHAR_W_S1 = 8
+
+-- Glyph width at any -S size, derived from the confirmed size-1 figure
+-- above. FBInk scales its built-in font by whole-number multiples (the
+-- same reason TEXT HEIGHT is a clean 8px per size unit, confirmed on
+-- hardware), so an 8x8 cell at size 1 implies 8*size px per glyph.
+--
+-- PARTIALLY VERIFIED: size 1 = 8px is measured on hardware (see
+-- CARD_CHAR_W_S1 above). The other sizes follow from FBInk's integer
+-- scaling and are NOT separately measured -- check with
+-- `fbink -E -S 2 "100%"` if any right-aligned size-2 text overhangs its
+-- intended right edge, which is exactly the bug the CARD_CHAR_W_S1
+-- measurement was introduced to fix on 2026-08-04.
+--
+-- This function is the single place the project answers "how wide is
+-- this string". Every right-aligned or centered label in this file goes
+-- through it, so a correction lands in one place instead of in each of
+-- the (now several) call sites that need it.
+local function char_w(size)
+    return 8 * (size or 1)
+end
+
+local function text_w(str, size)
+    return #str * char_w(size)
+end
 
 -- Hand-built pixel-art "refresh" icon (a circular arrow) for the CLAUDE
 -- USAGE card's Refresh button -- see that button's own comment in
@@ -223,6 +373,44 @@ local REFRESH_ICON_RECTS = {
     { 15, 12, 4, 2 }, -- arrowhead base
     { 16, 14, 2, 2 }, -- arrowhead tip
 }
+
+-- Pixel-art arrows for the pagination control, same technique and same
+-- reason as REFRESH_ICON_RECTS above: this FBInk build has no image
+-- support and no reliable Unicode, so there is no arrow glyph to draw
+-- and flat rectangles are the only primitive available. Each entry is
+-- {x, y, w, h} relative to the arrow's own top-left corner.
+--
+-- An 18x24 triangle approximated as six 4px-tall rows stepping 6px
+-- horizontally. The two are exact mirrors: identical width sequence
+-- (6, 12, 18, 18, 12, 6), with the LEFT arrow's rows right-aligned
+-- inside the 18px box (apex on the left) and the RIGHT arrow's rows
+-- left-aligned at x=0 (apex on the right). Both are symmetric about
+-- their horizontal midline.
+--
+-- UNVERIFIED ON HARDWARE: at 167ppi a 6px horizontal step per 4px row is
+-- roughly a 0.9mm jump, which should still read as a triangle rather
+-- than a staircase -- but that's reasoning, not observation, exactly
+-- like REFRESH_ICON_RECTS was shipped hand-placed and flagged for
+-- adjustment. If it reads as steps, the finer version is twelve 2px rows
+-- stepping 3px, at the cost of twice the fill_rect calls per arrow.
+local PAGER_ARROW_LEFT = {
+    { 12, 0, 6, 4 },
+    { 6, 4, 12, 4 },
+    { 0, 8, 18, 4 },
+    { 0, 12, 18, 4 },
+    { 6, 16, 12, 4 },
+    { 12, 20, 6, 4 },
+}
+local PAGER_ARROW_RIGHT = {
+    { 0, 0, 6, 4 },
+    { 0, 4, 12, 4 },
+    { 0, 8, 18, 4 },
+    { 0, 12, 18, 4 },
+    { 0, 16, 12, 4 },
+    { 0, 20, 6, 4 },
+}
+local PAGER_ARROW_W = 18
+local PAGER_ARROW_H = 24
 
 -- ===================== fbink subprocess plumbing =====================
 
@@ -354,9 +542,29 @@ end
 
 -- ===================== dashboard-specific drawing =====================
 
---- Draws the bottom nav bar (Today/Lists/Habits/Home) and returns its
---- hit_zones. Factored out of M.draw_dashboard() so M.clear_flash_message()
---- below can also call it, to restore the real nav bar after a toast
+-- The bottom nav bar's tabs, and which of them actually go somewhere.
+-- "Today" and "Learning" are real screens; the rest still raise a
+-- "coming soon" toast (see daemon.lua's handle_dashboard_tap).
+--
+-- "Learning" replaced "Lists" rather than being added as a fifth tab: a
+-- fifth tab would shrink tab_w from 150 to 120px and re-flow a bar that
+-- currently never moves, to make room for a stub nobody was using. At
+-- size 1, "Learning" is 8 glyphs * 8px = 64px drawn at tab_x + 20, so it
+-- ends 84px into a 150px tab -- comfortably inside it.
+M.NAV_TABS = { "Today", "Learning", "Habits", "Home" }
+M.NAV_TAB_IMPLEMENTED = { Today = true, Learning = true }
+
+--- Draws the bottom nav bar and returns its hit_zones.
+---
+--- `active_tab` is the name of the tab to render as selected. It is a
+--- REQUIRED argument in spirit: this used to hardcode "Today" as active,
+--- which was correct when Today was the only screen and silently wrong
+--- the moment a second one existed. Defaulting here (rather than erroring)
+--- keeps a missed call site from blanking the bar, but every caller
+--- passes it explicitly.
+---
+--- Factored out of M.draw_dashboard() so M.clear_flash_message() below
+--- can also call it, to restore the real nav bar after a toast
 --- auto-dismisses -- see that function's doc comment for why a toast
 --- overlays this exact region. Explicitly clears its own background to
 --- WHITE first (draw_dashboard's caller already did a full-screen white
@@ -364,26 +572,31 @@ end
 --- clear_flash_message() calls this WITHOUT a prior full-screen clear,
 --- specifically to erase whatever the toast drew here -- this function
 --- has to be safe to call standalone, not just as part of a full redraw).
-local function draw_nav_bar()
+local function draw_nav_bar(active_tab)
+    active_tab = active_tab or M.NAV_TABS[1]
     local hit_zones = {}
     local nav_y = L.nav_y
     M.fill_rect(0, nav_y, L.screen_w, L.nav_bar_h, "WHITE")
     M.fill_rect(0, nav_y, L.screen_w, 2, "BLACK")
     local tab_w = math.floor(L.screen_w / L.nav_tab_count)
-    local tabs = { "Today", "Lists", "Habits", "Home" }
-    for i, name in ipairs(tabs) do
+    for i, name in ipairs(M.NAV_TABS) do
         local tab_x = (i - 1) * tab_w
-        if name == "Today" then
+        if name == active_tab then
             M.fill_rect(tab_x, nav_y + 2, tab_w, L.nav_bar_h - 2, "BLACK")
             M.draw_text(tab_x + 20, nav_y + 20, name, { size = 1, fg = "WHITE", bg = "BLACK" })
+        elseif M.NAV_TAB_IMPLEMENTED[name] then
+            -- A real, reachable screen that just isn't the current one:
+            -- plain black text. Previously every non-active tab was gray,
+            -- which was accurate when they were all stubs but would now
+            -- tell the user that a working screen is unavailable.
+            M.draw_text(tab_x + 20, nav_y + 20, name, { size = 1 })
         else
             -- Not implemented yet -- tapping just raises a "coming soon"
-            -- toast (see daemon.lua's handle_tap). Rendered in a muted
-            -- gray rather than full black so it reads as unavailable
-            -- rather than as an equally-valid unselected tab; the active
-            -- tab (inverted black/white) and the disabled tabs (gray) are
-            -- now visually distinct from each other in both directions,
-            -- not just "not currently selected".
+            -- toast. Rendered in a muted gray rather than full black so
+            -- it reads as unavailable rather than as an equally-valid
+            -- unselected tab. With the middle case above, the bar now
+            -- distinguishes three real states: active (inverted),
+            -- available (black), unavailable (gray).
             M.draw_text(tab_x + 20, nav_y + 20, name, { size = 1, fg = "GRAY6" })
         end
         hit_zones[#hit_zones + 1] = {
@@ -392,6 +605,251 @@ local function draw_nav_bar()
         }
     end
     return hit_zones
+end
+
+--- Works out which page numbers to show in the pager's 7 slots.
+--- Returns an array whose entries are either a page number, or the
+--- string "gap" for an elided run.
+---
+--- The rules, for N total pages and current page p:
+---   N <= 7            [1, 2, ..., N]                    (everything fits)
+---   N >  7, p <= 4    [1, 2, 3, 4, 5, gap, N]
+---   N >  7, p >= N-3  [1, gap, N-4, N-3, N-2, N-1, N]
+---   N >  7, otherwise [1, gap, p-1, p, p+1, gap, N]
+---
+--- Two properties this is built around:
+---
+--- (1) Page 1 and page N are ALWAYS present, and always in the first and
+---     last slot -- so the two jumps a user actually needs from anywhere
+---     in a long list ("back to the start", "straight to the end") never
+---     move as p changes. Targets that stay put are much easier to hit
+---     on a touch panel than ones that shuffle.
+---
+--- (2) A "gap" never hides just one page. In every branch above, each
+---     gap elides at least two pages -- verified at the boundaries: the
+---     head case needs N >= 8 for slot 5 not to collide with slot 7, and
+---     the middle case only runs for p in 5..N-4, which forces p-1 >= 4
+---     and p+1 <= N-3. Showing a "..." that stands in for a single
+---     number would be strictly worse than just showing the number.
+local function build_page_slots(page, total_pages)
+    local slots = {}
+    if total_pages <= L.pager_max_slots then
+        for i = 1, total_pages do slots[i] = i end
+        return slots
+    end
+    if page <= 4 then
+        return { 1, 2, 3, 4, 5, "gap", total_pages }
+    elseif page >= total_pages - 3 then
+        return { 1, "gap", total_pages - 4, total_pages - 3,
+                 total_pages - 2, total_pages - 1, total_pages }
+    end
+    return { 1, "gap", page - 1, page, page + 1, "gap", total_pages }
+end
+
+--- Draws a pagination row: [<] 1 2 3 ... N [>], and appends its tap
+--- zones to `hit_zones`.
+---
+--- `target` is carried on every zone this emits ("tasks", "learning",
+--- ...) so the same control can drive more than one paged list without
+--- the daemon having to guess which one a tap belongs to.
+---
+--- Arrows are DISABLED (drawn gray, no hit zone registered) at the ends
+--- rather than wrapping around. The old single "See more tasks" button
+--- wrapped because it had no other way to get back to page 1 -- but once
+--- there's an explicit "previous" plus directly tappable numbers, a
+--- "previous" that jumps to the last page is a trap. Gray-and-inert is
+--- already this file's vocabulary for unavailable (the "coming soon" nav
+--- tabs).
+local function draw_pager(row_y, page, total_pages, target, hit_zones)
+    local center_y = row_y + math.floor(L.task_row_h / 2)
+
+    -- --- arrows ---
+    local function draw_arrow(rects, btn_x, enabled, kind, dest_page)
+        local gx = btn_x + math.floor((L.pager_arrow_btn_w - PAGER_ARROW_W) / 2)
+        local gy = center_y - math.floor(PAGER_ARROW_H / 2)
+        local color = enabled and "BLACK" or "GRAY6"
+        for _, r in ipairs(rects) do
+            M.fill_rect(gx + r[1], gy + r[2], r[3], r[4], color)
+        end
+        if enabled then
+            hit_zones[#hit_zones + 1] = {
+                kind = kind, target = target, page = dest_page,
+                x = btn_x, y = row_y, w = L.pager_arrow_btn_w, h = L.task_row_h,
+            }
+        end
+    end
+
+    draw_arrow(PAGER_ARROW_LEFT, L.pager_left_arrow_x, page > 1, "page_prev", page - 1)
+    draw_arrow(PAGER_ARROW_RIGHT, L.pager_right_arrow_x, page < total_pages, "page_next", page + 1)
+
+    -- --- number cells ---
+    local slots = build_page_slots(page, total_pages)
+    local k = #slots
+    local strip_w = k * L.pager_cell_pitch - L.pager_cell_gap
+    local strip_x = L.pager_band_x + math.floor((L.pager_band_w - strip_w) / 2)
+    local cell_y = row_y + math.floor((L.task_row_h - L.pager_cell_h) / 2)
+
+    for i, slot in ipairs(slots) do
+        local cell_x = strip_x + (i - 1) * L.pager_cell_pitch
+
+        if slot == "gap" then
+            -- Three small squares, not a "..." string: at size 1 a period
+            -- is a single dot on the baseline of an 8px cell, which on
+            -- flat non-anti-aliased e-ink is close to invisible.
+            -- Rectangles are the one primitive with guaranteed output.
+            -- GRAY6 and no hit zone -- it is not a target.
+            local dot_y = center_y - 2
+            for d = 0, 2 do
+                M.fill_rect(cell_x + 14 + d * 8, dot_y, 4, 4, "GRAY6")
+            end
+        else
+            local label = tostring(slot)
+            -- Three-digit page numbers can't occur at the current
+            -- max_visible_tasks (100 pages would need 400 tasks), but a
+            -- 3-glyph size-2 label would exactly fill the cell with zero
+            -- padding if that ever changed, so it steps down a size
+            -- instead of silently overflowing.
+            local size = (#label >= 3) and 1 or L.pager_font_size
+            local label_x = cell_x + math.floor((L.pager_cell_w - text_w(label, size)) / 2)
+            local label_y = center_y - math.floor(8 * size / 2)
+
+            if slot == page then
+                -- Inverted, matching the active nav tab and the
+                -- keyboard's "Add" key -- this file's established
+                -- treatment for "the active/affirmative one".
+                M.fill_rect(cell_x, cell_y, L.pager_cell_w, L.pager_cell_h, "BLACK")
+                M.draw_text(label_x, label_y, label, { size = size, fg = "WHITE", bg = "BLACK" })
+                -- No hit zone: tapping the page you're already on would
+                -- cost a full-screen refresh to redraw an identical
+                -- screen. A pure flash for nothing.
+            else
+                M.draw_text(label_x, label_y, label, { size = size })
+                -- A 2px underline as a tappability affordance. A bare
+                -- digit is a ~16px-wide mark sitting inside a 56px hit
+                -- zone, and on an IR panel a user who can't see the
+                -- target won't aim at it. One fill_rect is the cheapest
+                -- possible fix for that.
+                local ul_w = text_w(label, size) + 8
+                M.fill_rect(cell_x + math.floor((L.pager_cell_w - ul_w) / 2),
+                    cell_y + L.pager_cell_h - 10, ul_w, 2, "BLACK")
+                -- The zone is widened to eat the inter-cell gaps so
+                -- adjacent cells abut exactly and no tap lands in a dead
+                -- strip between two numbers.
+                hit_zones[#hit_zones + 1] = {
+                    kind = "page_goto", target = target, page = slot,
+                    x = cell_x - math.floor(L.pager_cell_gap / 2), y = row_y,
+                    w = L.pager_cell_pitch, h = L.task_row_h,
+                }
+            end
+        end
+    end
+end
+
+--- Draws the header battery indicator: a battery glyph built from flat
+--- rectangles (this FBInk build has no image support and no reliable
+--- Unicode, same constraint documented for REFRESH_ICON_RECTS above),
+--- plus the percentage as text to its left.
+---
+--- `percent` may be nil, meaning "not known" -- either the battery
+--- source hasn't been probed yet or every source failed (see
+--- src/battery.lua). That state is drawn EXPLICITLY, as a gray-filled
+--- battery with "--%", rather than hidden or defaulted to a number:
+---   - Drawing nothing leaves a hole in the corner that reads as "the
+---     dashboard is broken".
+---   - Drawing a stale or default number never looks broken, so a
+---     genuinely failed battery read would go unnoticed indefinitely.
+--- GRAY6 is already this file's established vocabulary for
+--- "unavailable" (disabled nav tabs, the keyboard's placeholder text),
+--- so the gray fill says "no reading" in a word the UI already uses --
+--- unlike a "?" glyph, which would be a novel symbol to decode at 8px.
+---
+--- Erases and redraws its whole region (L.battery_region_*) every time,
+--- so it is safe to call both as part of a full dashboard redraw and on
+--- its own for a battery-only partial update.
+local function draw_battery(percent)
+    local known = (percent ~= nil)
+    if known then
+        if percent < 0 then percent = 0 end
+        if percent > 100 then percent = 100 end
+    end
+    local is_low = known and percent <= L.battery_low_threshold
+
+    M.fill_rect(L.battery_region_x, L.battery_region_y,
+        L.battery_region_w, L.battery_region_h, "WHITE")
+
+    -- Body: drawn as a filled black rect with a smaller inner rect
+    -- knocked out of it, the same way this file already fakes an
+    -- outline-only box for the task checkbox (fbink's CLI has no
+    -- outline-rect primitive).
+    local b = L.battery_border
+    local interior_color = known and "WHITE" or "GRAY6"
+    M.fill_rect(L.battery_body_x, L.battery_body_y,
+        L.battery_glyph_w, L.battery_glyph_h, "BLACK")
+    M.fill_rect(L.battery_body_x + b, L.battery_body_y + b,
+        L.battery_glyph_w - 2 * b, L.battery_glyph_h - 2 * b, interior_color)
+
+    -- Terminal nub on the right, vertically centered on the body. Its
+    -- right edge lands exactly on the screen's right margin.
+    M.fill_rect(L.battery_body_x + L.battery_glyph_w,
+        L.battery_body_y + math.floor((L.battery_glyph_h - L.battery_nub_h) / 2),
+        L.battery_nub_w, L.battery_nub_h, "BLACK")
+
+    if known then
+        local track_w = L.battery_glyph_w - 2 * b
+        local fill_w = math.floor(track_w * percent / 100)
+        -- A non-empty battery must never render identically to an empty
+        -- one: at 32px of track, each percent is only 0.32px, so
+        -- everything below ~4% floors to zero. Same reasoning as the
+        -- usage card's `if fill_w > 0` guard, one step further.
+        if percent >= 1 and fill_w < 2 then fill_w = 2 end
+        if fill_w > 0 then
+            M.fill_rect(L.battery_body_x + b, L.battery_body_y + b,
+                fill_w, L.battery_glyph_h - 2 * b, "BLACK")
+        end
+    end
+
+    local label = known and string.format("%d%%", percent) or "--%"
+    local size = L.battery_font_size
+    local text_x = L.battery_text_right - text_w(label, size)
+
+    if is_low then
+        -- Inverted badge for a low battery. In THIS file inversion means
+        -- different things in different places, and the header's local
+        -- meaning is already established one row below by the
+        -- CONNECTING/OFFLINE badge: "this is the one thing up here worth
+        -- noticing". Reusing it costs the user no new vocabulary.
+        --
+        -- The GLYPH deliberately stays in normal polarity. Inverting it
+        -- too would be both louder and semantically backwards -- a
+        -- filled-in battery reads as MORE charged, not less -- so the
+        -- badge carries "pay attention" while the glyph keeps carrying
+        -- "here's the actual level".
+        local pad_x, pad_y = 6, 4
+        M.fill_rect(text_x - pad_x, L.battery_text_y - pad_y,
+            text_w(label, size) + 2 * pad_x, 8 * size + 2 * pad_y, "BLACK")
+        M.draw_text(text_x, L.battery_text_y, label, { size = size, fg = "WHITE", bg = "BLACK" })
+    else
+        M.draw_text(text_x, L.battery_text_y, label,
+            { size = size, fg = known and "BLACK" or "GRAY6" })
+    end
+end
+
+--- Repaints ONLY the battery corner and flushes just that rectangle --
+--- for the periodic battery poll, which would otherwise cost a full
+--- GC16 dashboard redraw (a whole-screen flash) to update two digits.
+--- Same partial-refresh pattern as M.clear_flash_message().
+---
+--- Uses GC16 rather than A2: this is a small text region, and A2 is
+--- confirmed on this hardware to leave non-self-clearing ghosting on
+--- exactly that (see M.update_keyboard_preview's comment) -- old digits
+--- showing through new ones is the identical failure mode. The region is
+--- tiny, so full quality is cheap here.
+function M.draw_battery_only(percent)
+    draw_battery(percent)
+    M.flush("GC16", {
+        x = L.battery_region_x, y = L.battery_region_y,
+        w = L.battery_region_w, h = L.battery_region_h,
+    })
 end
 
 --- Renders the full dashboard from the current state snapshot (the exact
@@ -414,7 +872,11 @@ end
 --- "tap again to delete" armed state (see daemon.lua's handle_tap),
 --- drawn with a distinct highlighted row + inverted delete zone so it's
 --- visually unambiguous which row a second tap will delete.
-function M.draw_dashboard(state, conn_status, task_page, armed_delete_id)
+---
+--- battery_percent (optional): 0-100, or nil for "unknown" -- see
+--- draw_battery() above for why nil is drawn explicitly rather than
+--- hidden or defaulted.
+function M.draw_dashboard(state, conn_status, task_page, armed_delete_id, battery_percent)
     local hit_zones = {}
     local page = task_page or 1
 
@@ -427,6 +889,12 @@ function M.draw_dashboard(state, conn_status, task_page, armed_delete_id)
 
     M.draw_text(L.margin, L.header_y, time_str, { size = L.time_font_size })
     M.draw_text(L.margin, L.date_y, date_str, { size = L.date_font_size })
+
+    -- Battery shares the clock's row, hard against the right margin.
+    -- No collision risk with the clock: "14:30" at size 4 is 5 glyphs *
+    -- 32px = 160px wide, ending at x=184, while this region starts at
+    -- L.battery_region_x (448 at the current font sizes).
+    draw_battery(battery_percent)
 
     -- Connection status: don't give "everything is fine" the same visual
     -- weight as "something needs your attention". ONLINE is the expected,
@@ -482,6 +950,31 @@ function M.draw_dashboard(state, conn_status, task_page, armed_delete_id)
         if page < 1 then page = 1 end
         local start_idx = (page - 1) * L.max_visible_tasks + 1
         local end_idx = math.min(start_idx + L.max_visible_tasks - 1, total)
+
+        -- Swipe-to-page-turn region, covering the whole task list block.
+        --
+        -- This zone CONTAINS every task row, delete zone, pager control
+        -- and the "+ Add Task" row. It is not a tap target and must never
+        -- be resolved as one: daemon.lua's hit_test() skips it by kind
+        -- (see GESTURE_ZONE_KINDS there) and reaches it only through
+        -- find_zone_by_kind() when handling a swipe. Its position in this
+        -- table is therefore irrelevant -- deliberately so, because an
+        -- earlier version of this comment claimed the opposite and the
+        -- resulting tap-swallowing made the whole task area inert.
+        --
+        -- Full screen width (x=0, not L.margin) on purpose: a page-turn
+        -- swipe naturally starts at the very edge of the screen, and there
+        -- is nothing else in this horizontal band to conflict with.
+        -- total_pages travels WITH the zone so the daemon can clamp a
+        -- swipe at the first/last page without re-deriving the page count
+        -- from a task list it deliberately doesn't own.
+        hit_zones[#hit_zones + 1] = {
+            kind = "task_swipe_area",
+            total_pages = total_pages,
+            x = 0, y = L.task_row_first_y,
+            w = L.screen_w,
+            h = L.task_list_max_bottom_y - L.task_row_first_y,
+        }
 
         local shown = 0
         for idx = start_idx, end_idx do
@@ -569,20 +1062,18 @@ function M.draw_dashboard(state, conn_status, task_page, armed_delete_id)
                       -- of drawing on top of it
         end
 
-        -- "See more" row: only shown when tasks don't all fit on one
-        -- page. Tapping it cycles to the next page, wrapping back to
-        -- page 1 after the last one -- a single button is enough to
-        -- browse the whole list without needing a separate "back".
+        -- Pagination row, in the same slot the old "See more tasks (page
+        -- 2/5)" text row used to occupy. That row could only step
+        -- forward one page at a time and wrapped at the end, so reaching
+        -- page 4 of 5 meant tapping three times and watching three
+        -- full-screen refreshes; the numbers here are direct jumps.
+        --
+        -- Hidden entirely at a single page: every arrow would be
+        -- disabled and the only number would be the untappable current
+        -- one, i.e. inert furniture occupying a whole row.
         if total_pages > 1 then
-            local more_row_y = y + shown * (L.task_row_h + L.task_row_gap)
-            local next_page = (page % total_pages) + 1
-            M.draw_text(L.margin, more_row_y + 14,
-                string.format("See more tasks (page %d/%d)", page, total_pages), { size = 1 })
-            hit_zones[#hit_zones + 1] = {
-                kind = "see_more_tasks",
-                next_page = next_page,
-                x = L.margin, y = more_row_y, w = L.screen_w - 2 * L.margin, h = L.task_row_h,
-            }
+            local pager_row_y = y + shown * (L.task_row_h + L.task_row_gap)
+            draw_pager(pager_row_y, page, total_pages, "tasks", hit_zones)
             shown = shown + 1
         end
 
@@ -749,7 +1240,218 @@ function M.draw_dashboard(state, conn_status, task_page, armed_delete_id)
     end
 
     -- --- bottom nav bar ---
-    for _, z in ipairs(draw_nav_bar()) do
+    for _, z in ipairs(draw_nav_bar("Today")) do
+        hit_zones[#hit_zones + 1] = z
+    end
+
+    M.flush("GC16")
+    return hit_zones, page
+end
+
+-- ===================== LEARNING screen =====================
+--
+-- A dedicated full screen listing courses and books, reached from the
+-- "Learning" nav tab. It shows ONLY learning items -- no tasks, no
+-- Claude usage card, no Exit Dashboard / Restart SSH footer. Those all
+-- stay on the Today screen where they already live.
+--
+-- Every row draws from four fields the backend has already derived
+-- (name, percent, detail, done -- see backend/state.py's _recompute),
+-- so nothing here branches on whether an item is a course or a book, and
+-- nothing here divides. A book is simply a row whose `detail` is
+-- non-empty; that string doubles as the type signal, which is why there
+-- is no separate badge or icon distinguishing the two kinds.
+
+--- Draws one learning row. Layout, all relative to row_y:
+---
+---   +8   name (size 2, left)        detail (size 1, right)   pct (size 2, right)
+---   +33  [=================================              ]  progress bar
+---
+--- The bar spans the full content width for BOTH kinds. That's the one
+--- rule worth protecting on this screen: the whole point of the list is
+--- comparing how far along several things are, and that comparison only
+--- works if every bar shares a denominator width.
+local function draw_learning_row(item, row_y)
+    local right = L.screen_w - L.margin
+    local percent = item.percent or 0
+    if percent < 0 then percent = 0 end
+    if percent > 100 then percent = 100 end
+
+    -- Percent, right-aligned to the margin in its own fixed slot.
+    local pct_str = string.format("%d%%", percent)
+    local pct_size = L.learn_name_font_size
+    local pct_x = right - text_w(pct_str, pct_size)
+    M.draw_text(pct_x, row_y + 8, pct_str, { size = pct_size })
+
+    -- Book detail ("120/320 pages"), right-aligned to the left of the
+    -- percent. Drawn in BLACK at size 1, not GRAY6: the size step from
+    -- 16px to 8px already establishes that this is secondary, and in
+    -- this file gray specifically means unavailable/disabled -- which a
+    -- real page count emphatically is not. Reusing gray for "secondary
+    -- but real" would blunt the one meaning it currently carries.
+    local detail = item.detail
+    if detail == "" then detail = nil end
+    local name_right = pct_x - L.gap_sm
+    if detail then
+        local detail_x = pct_x - L.gap_sm - text_w(detail, 1)
+        -- +4 optically centers 8px-tall text against the 16px name
+        M.draw_text(detail_x, row_y + 12, detail, { size = 1 })
+        name_right = detail_x - L.gap_sm
+    end
+
+    -- Name, truncated to whatever room is left after the two
+    -- right-aligned elements above have taken theirs.
+    local name = item.name or ""
+    if item.done then name = name .. " (done)" end
+    local name_size = L.learn_name_font_size
+    local max_chars = math.floor((name_right - L.margin) / char_w(name_size))
+    if max_chars < 1 then max_chars = 1 end
+    if #name > max_chars then
+        -- Note this is deliberately not the `sub(1, max - 1) .. "..."`
+        -- form used for task rows above, which actually yields a string
+        -- two characters LONGER than the cap it's given.
+        name = name:sub(1, math.max(1, max_chars - 3)) .. "..."
+    end
+    M.draw_text(L.margin, row_y + 8, name, { size = name_size })
+
+    -- Progress bar: the CLAUDE USAGE card's treatment, unchanged -- a
+    -- 1px BLACK outline around a WHITE track, BLACK fill on top. The
+    -- outline matters MORE here than it does on the card: there the
+    -- track sat on GRAY6, so an empty bar was merely low-contrast, while
+    -- here the background is plain WHITE and an un-outlined 0% bar would
+    -- be literally invisible -- a row with nothing where its bar should
+    -- be, which reads as a rendering fault rather than as "not started".
+    local bar_y = row_y + L.learn_bar_top
+    local bar_w = L.screen_w - 2 * L.margin
+    M.fill_rect(L.margin - 1, bar_y, bar_w + 2, L.learn_bar_h + 2, "BLACK")
+    M.fill_rect(L.margin, bar_y + 1, bar_w, L.learn_bar_h, "WHITE")
+    local fill_w = math.floor(bar_w * percent / 100)
+    if fill_w > 0 then
+        M.fill_rect(L.margin, bar_y + 1, fill_w, L.learn_bar_h, "BLACK")
+    end
+end
+
+--- Renders the Learning screen. Same contract as M.draw_dashboard:
+--- returns (hit_zones, effective_page), with the page clamped to however
+--- many pages currently exist so a shrinking list can't strand the user
+--- on a page that no longer has anything on it.
+---
+--- state may be nil (not connected / nothing received yet), which is
+--- drawn as an explicit "waiting" message and kept DISTINCT from "you
+--- have no learnings yet" -- collapsing the two would render a comms
+--- failure as the confident claim that the user's list is empty.
+function M.draw_learning(state, conn_status, page, battery_percent)
+    local hit_zones = {}
+    page = page or 1
+
+    M.fill_rect(0, 0, L.screen_w, L.screen_h, "WHITE")
+
+    -- --- header ---
+    -- Size 3, not 4: the clock is deliberately the only size-4 element
+    -- in this app (see time_font_size), and a screen title competing
+    -- with it would break that hierarchy. Matches draw_confirm_exit's
+    -- existing precedent for a screen title.
+    M.draw_text(L.margin, L.learn_title_y, "LEARNING", { size = 3 })
+
+    -- nil means "no state received yet"; an empty table means "connected,
+    -- and you genuinely have nothing tracked". A state snapshot that
+    -- somehow arrives WITHOUT a learnings key (an older backend) counts
+    -- as the latter, not the former -- we did hear from the laptop, so
+    -- claiming to still be waiting for it would be the wrong message.
+    local items = nil
+    if state then items = state.learnings or {} end
+
+    -- Summary line, occupying the same slot as the dashboard's date.
+    if items then
+        local courses, books = 0, 0
+        for _, it in ipairs(items) do
+            if it.kind == "book" then books = books + 1 else courses = courses + 1 end
+        end
+        local parts = {}
+        if courses > 0 then
+            parts[#parts + 1] = courses .. (courses == 1 and " course" or " courses")
+        end
+        if books > 0 then
+            parts[#parts + 1] = books .. (books == 1 and " book" or " books")
+        end
+        local summary = (#parts > 0) and table.concat(parts, "  ") or "Nothing tracked yet"
+        M.draw_text(L.margin, L.learn_summary_y, summary, { size = L.date_font_size })
+    end
+
+    -- Connection status, reusing the dashboard's badge geometry exactly.
+    -- Only drawn when something is wrong: on this screen every number is
+    -- a progress figure, and silently presenting stale progress as
+    -- current is the specific failure worth warning about. Same
+    -- reasoning (and same pixels) as the dashboard's badge.
+    if conn_status ~= "open" then
+        local badge_x = L.screen_w - L.status_badge_w - L.margin
+        local status_text = conn_status == "connecting" and "CONNECTING" or "OFFLINE"
+        M.fill_rect(badge_x, L.status_badge_y, L.status_badge_w, L.status_badge_h, "BLACK")
+        M.draw_text(badge_x + L.gap_xs, L.status_text_y, status_text,
+            { size = L.status_font_size, fg = "WHITE", bg = "BLACK" })
+    end
+
+    -- Battery sits on the title's row, same fixed corner as on the
+    -- dashboard. "LEARNING" at size 3 is 8 glyphs * 24px = 192px ending
+    -- at x=216, so it is nowhere near this region.
+    draw_battery(battery_percent)
+
+    M.fill_rect(L.margin, L.divider_y, L.screen_w - 2 * L.margin, L.divider_h, "BLACK")
+
+    -- --- list ---
+    if not items then
+        M.draw_text(L.margin, L.learn_row_first_y, "Waiting for data from laptop...", { size = 1 })
+    elseif #items == 0 then
+        M.draw_text(L.margin, L.learn_row_first_y, "Nothing here yet.", { size = 2 })
+        M.draw_text(L.margin, L.learn_row_first_y + 16 + L.gap_sm,
+            "Add courses and books from Telegram.", { size = 1 })
+        M.draw_text(L.margin, L.learn_row_first_y + 16 + L.gap_sm + 8 + L.gap_xs,
+            "/course Spanish   or   /book Atomic Habits 320", { size = 1 })
+    else
+        -- Finished items sink to the bottom, matching how the task list
+        -- already orders done tasks -- and, as there, done via a manual
+        -- stable partition rather than table.sort, which Lua does not
+        -- guarantee to be stable and which could therefore shuffle
+        -- same-status rows against each other on every redraw.
+        local sorted = {}
+        do
+            local finished = {}
+            for _, it in ipairs(items) do
+                if it.done then finished[#finished + 1] = it else sorted[#sorted + 1] = it end
+            end
+            for _, it in ipairs(finished) do sorted[#sorted + 1] = it end
+        end
+
+        local total = #sorted
+        local total_pages = math.max(1, math.ceil(total / L.learn_rows_per_page))
+        if page > total_pages then page = total_pages end
+        if page < 1 then page = 1 end
+
+        local start_idx = (page - 1) * L.learn_rows_per_page + 1
+        local end_idx = math.min(start_idx + L.learn_rows_per_page - 1, total)
+        for idx = start_idx, end_idx do
+            local row_y = L.learn_row_first_y + (idx - start_idx) * L.learn_row_pitch
+            draw_learning_row(sorted[idx], row_y)
+        end
+
+        -- Swipe region, registered before the pager for the same reason
+        -- the task list's is: it spans the rows above, and daemon.lua
+        -- resolves it through its own kind-specific lookup rather than
+        -- through hit_test().
+        hit_zones[#hit_zones + 1] = {
+            kind = "learning_swipe_area",
+            total_pages = total_pages,
+            x = 0, y = L.learn_row_first_y,
+            w = L.screen_w,
+            h = L.learn_pager_y - L.learn_row_first_y,
+        }
+
+        if total_pages > 1 then
+            draw_pager(L.learn_pager_y, page, total_pages, "learning", hit_zones)
+        end
+    end
+
+    for _, z in ipairs(draw_nav_bar("Learning")) do
         hit_zones[#hit_zones + 1] = z
     end
 
@@ -789,16 +1491,25 @@ function M.flash_message(text)
 end
 
 --- Restores the real nav bar after a toast (M.flash_message() above)
---- auto-dismisses. Deliberately does NOT redraw the whole dashboard --
---- the nav bar's own content is fully static (always the same 4 tabs,
---- "Today" always the active one in this v1), so a full dashboard redraw
---- would cost an unnecessary full-screen flash just to restore a strip
---- that never needed the rest of the screen redrawn with it. Returns
---- nothing: the nav bar's hit_zones never change (fixed position, fixed
---- tabs), so daemon.lua's existing current_hit_zones from the last full
---- M.draw_dashboard() call are still correct and don't need updating.
-function M.clear_flash_message()
-    draw_nav_bar()
+--- auto-dismisses. Deliberately does NOT redraw the whole screen -- the
+--- nav bar's position and tab list are fixed, so a full redraw would
+--- cost an unnecessary full-screen flash just to restore one strip.
+--- Returns nothing: the nav bar's hit_zones never change (fixed
+--- position, fixed tabs), so daemon.lua's existing current_hit_zones
+--- from the last full draw are still correct.
+---
+--- `active_tab` MUST be passed. This function's original doc comment
+--- said the nav bar's content was "fully static (always the same 4 tabs,
+--- 'Today' always the active one in this v1)" -- true when written, and
+--- false the moment a second real screen existed. Without this argument,
+--- dismissing a toast on the Learning screen would restore a nav bar
+--- highlighting Today, leaving the UI claiming to be on a screen it
+--- isn't. That is precisely the silent-drift failure this file's
+--- footer_y comment was written about, so it gets the same fix: one
+--- caller-supplied source of truth instead of a value re-derived (here,
+--- re-assumed) in a second place.
+function M.clear_flash_message(active_tab)
+    draw_nav_bar(active_tab)
     M.flush("GC16", { x = 0, y = L.nav_y, w = L.screen_w, h = L.nav_bar_h })
 end
 
@@ -812,16 +1523,27 @@ end
 -- NOTE, same spirit as this file's header comment: unlike the task rows
 -- and nav bar (whose pixel positions were measured against real
 -- hardware), the exact horizontal centering of each key's LABEL within
--- its key box below is an ESTIMATE (KBD_CHAR_W_ESTIMATE), not something
--- measured on the device -- there was no confirmed per-glyph width figure
--- to build on, only the confirmed 8px/unit TEXT HEIGHT this file's header
--- comment already established. If key labels look visibly off-center
--- once this is running on real hardware, adjust KBD_CHAR_W_ESTIMATE
--- rather than the per-key math below (which is otherwise computed, not
--- hand-placed, for the same "don't hand-derive pixel arithmetic that
--- can't be test-run before reaching the device" reason as the rest of
--- this section).
-local KBD_CHAR_W_ESTIMATE = 12 -- approx width in px of one glyph at size=2
+-- its key box depends on the per-glyph width at size 2, which is
+-- extrapolated rather than directly measured -- see char_w() near the
+-- top of this file. If key labels look visibly off-center once this is
+-- running on real hardware, adjust char_w() rather than the per-key math
+-- below (which is otherwise computed, not hand-placed, for the same
+-- "don't hand-derive pixel arithmetic that can't be test-run before
+-- reaching the device" reason as the rest of this section).
+-- SUPERSEDED (kept as a note, not a value): this section originally
+-- defined its own `KBD_CHAR_W_ESTIMATE = 12` for the width of one size-2
+-- glyph. That number predates the 2026-08-04 hardware measurement that
+-- established 8px per glyph at size 1 (CARD_CHAR_W_S1) alongside the
+-- already-confirmed 8px-per-size-unit text HEIGHT -- together implying
+-- 16px, not 12, at size 2. Two different constants for the same physical
+-- quantity in one file is exactly the drift this file's other comments
+-- keep warning about, so key centering now goes through char_w() like
+-- every other measured-width call site.
+--
+-- Practical effect: key labels shift 2px left, i.e. onto true center if
+-- char_w is right. If they instead look visibly off-center on hardware,
+-- fix char_w() near the top of this file (which corrects every screen at
+-- once), not this call site.
 
 L.kbd_key_w = 53 -- effectively maxed out already: row 1 has 10 keys, and
                   -- (usable_w - 9*kbd_key_gap)/10 = 53.4px is the hard
@@ -980,9 +1702,10 @@ function M.draw_keyboard(buffer)
 
     local function draw_letter_key(zone)
         M.fill_rect(zone.x, zone.y, zone.w, zone.h, "GRAY6")
-        -- Rough visual centering of a single glyph -- see this section's
-        -- header note on KBD_CHAR_W_ESTIMATE.
-        local tx = zone.x + math.floor((zone.w - KBD_CHAR_W_ESTIMATE) / 2)
+        -- Centered via the file-wide glyph-width helper -- see the note
+        -- above this section's layout constants on why this no longer
+        -- uses a local estimate of its own.
+        local tx = zone.x + math.floor((zone.w - text_w(zone.label, 2)) / 2)
         local ty = zone.y + math.floor((zone.h - 16) / 2) -- 16 = real size-2 text height
         M.draw_text(tx, ty, zone.label, { size = 2, fg = "WHITE", bg = "GRAY6" })
         hit_zones[#hit_zones + 1] = {

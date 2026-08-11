@@ -1,0 +1,25 @@
+# Force LF line endings on everything that gets copied to and run on the
+# KINDLE, regardless of the developer machine's git settings.
+#
+# WHY THIS FILE EXISTS: this repo is developed on Windows, where git's
+# `core.autocrlf=true` (the Windows default, and what this machine is set
+# to) rewrites text files to CRLF on checkout. That is harmless for the
+# Windows-side backend, but the Kindle runs busybox on Linux, where a
+# shell script with CRLF line endings fails immediately and confusingly:
+#
+#     /bin/sh: ./run.sh: /bin/sh^M: bad interpreter
+#     ./run.sh: line 2: $'\r': command not found
+#
+# The working tree happened to be correct because these files were
+# authored with LF and never re-checked-out -- but a fresh `git clone` on
+# a Windows machine would have produced broken copies of every on-device
+# script, with a failure mode that looks nothing like a line-ending
+# problem to whoever hits it.
+
+*.sh   text eol=lf
+*.lua  text eol=lf
+
+# Windows-side scripts: keep CRLF. .bat in particular can misbehave with
+# LF-only endings under cmd.exe.
+*.bat  text eol=crlf
+*.ps1  text eol=crlf

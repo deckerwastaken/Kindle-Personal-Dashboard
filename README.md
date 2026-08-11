@@ -1,9 +1,10 @@
 # Kindle Dashboard
 
-A personal "Today" dashboard on a jailbroken Kindle e-reader: task list,
-Telegram bot integration, and Claude usage tracking, rendered directly to
-the e-ink screen and controlled by touch. No cloud, no third-party
-service — the backend runs on your own laptop.
+A personal dashboard on a jailbroken Kindle e-reader: a Today screen with
+your task list and Claude usage, a Learning screen tracking your progress
+through courses and books, and a Telegram bot to feed both — rendered
+directly to the e-ink screen and controlled by touch and swipe. No cloud,
+no third-party service — the backend runs on your own laptop.
 
 ## Start here
 
@@ -30,6 +31,36 @@ lockscreen/    -- optional: replaces the Kindle's stock screensaver with
                   custom text. See lockscreen/README.md.
 docs/          -- setup guide, jailbreak reference, and secrets policy.
 ```
+
+## Tests
+
+There are four suites. All of them run on your laptop with no Kindle, no
+network, and nothing to install beyond what the backend already needs:
+
+```
+cd kindle-daemon/tests && luajit test_gestures.lua        # tap/swipe classification
+cd kindle-daemon/tests && luajit test_layout.lua          # every screen's layout
+cd kindle-daemon/tests && luajit test_hit_resolution.lua  # what a tap actually hits
+python backend/tests/test_learnings.py                    # from the repo root
+```
+
+`test_layout.lua` swaps a recorder in for the `fbink` CLI, renders each
+screen, and checks the drawing commands that *would* have been sent —
+nothing off-screen, no overlapping tap targets, none under 40px,
+pagination eliding the right pages.
+
+`test_hit_resolution.lua` covers the gap that leaves: it takes those same
+tap zones and runs the *daemon's* own hit-testing over concrete pixel
+coordinates, asserting each lands on the control you aimed at. That
+distinction is not academic — a bug that made the entire task area
+untappable was invisible to the layout test (the layout was perfectly
+self-consistent; the consumer resolved it wrong) and is caught
+immediately by this one.
+
+Together they cover the arithmetic. They deliberately cannot tell you
+whether anything *looks* right on real e-ink — ghosting, whether the
+pixel-art arrows read as triangles, whether a 2px outline is visible at
+167ppi. `kindle-daemon/tools/` holds the on-device diagnostics for that.
 
 ## Is my Kindle compatible?
 

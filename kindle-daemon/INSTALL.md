@@ -223,13 +223,17 @@ What should happen:
   "TODAY" with your task list (or "Waiting for data from laptop..." if
   the backend isn't reachable yet), a "CLAUDE USAGE" card, and a bottom
   nav bar.
+- The top-right corner of the clock's row should show a battery icon and
+  a percentage. If it shows `--%` in gray, the daemon could not read this
+  device's battery -- see "Battery shows --%" below.
 - Within a few seconds (once it reaches your laptop), the header's
   status indicator should say `ONLINE` instead of `OFFLINE`/`CONNECTING`.
 - Tapping a task's checkbox should toggle it (check the log file at
   `/mnt/us/kindle-daemon/daemon.log` if nothing visibly happens --
   it logs every tap and what zone, if any, it hit).
-- Tapping "Lists", "Habits", or "Home" should flash a small "coming soon"
-  message near the bottom.
+- Tapping "Habits" or "Home" should flash a small "coming soon" message
+  near the bottom. Tapping "Learning" should switch to the Learning
+  screen, and tapping "Today" should come back.
 
 Leave it running for a few minutes. Try:
 - Turning your laptop's WiFi off and back on, or restarting the backend
@@ -237,6 +241,42 @@ Leave it running for a few minutes. Try:
   `ONLINE` on its own without you touching the Kindle.
 - Sending `/add something` via Telegram to your bot -- the new task
   should appear on the Kindle without you tapping anything.
+- Sending `/course Spanish` then `/percent L1 40` -- switch to the
+  Learning tab and you should see a row with a progress bar at 40%.
+
+#### Battery shows `--%`
+
+That means every battery source `src/battery.lua` knows about failed, so
+it is honestly reporting "unknown" rather than guessing a number. Run:
+
+```sh
+sh /mnt/us/kindle-daemon/tools/battery_probe.sh
+```
+
+It prints every battery-related file and command this device actually
+exposes. Find one that prints a plain 0-100 integer and add its path to
+`SOURCES` in `src/battery.lua`. The daemon logs which source it settled
+on at startup, so `grep battery /mnt/us/kindle-daemon/daemon.log` also
+tells you what it tried.
+
+#### Testing swipe gestures
+
+`tools/tap_test.lua` now prints how each gesture was classified along
+with the raw start/end coordinates:
+
+```sh
+cd /mnt/us/kindle-daemon/tools
+/mnt/us/koreader/luajit tap_test.lua
+```
+
+(Same invocation as `evtest.lua` in step 3, and the same caveat applies
+about KOReader's UI disappearing while it runs.)
+
+A deliberate swipe should print `swipe left` / `swipe right`, and an
+ordinary tap should print `tap`. If a normal tap registers as a swipe (or
+a real swipe doesn't), adjust `SWIPE_MIN_PX` / `SWIPE_AXIS_RATIO` at the
+top of `src/touch.lua` -- those are reasoned from the screen geometry,
+not measured against this panel.
 
 ### Also test the on-device controls (new)
 
