@@ -134,6 +134,36 @@ local conn_status = "connecting" -- "connecting" | "open" | "offline"
 local reconnect_backoff_ms = config.reconnect_min_ms
 local next_reconnect_at = 0 -- os.clock()-based monotonic-ish deadline
 
+-- --- connection watchdog ---
+--
+-- Detects a connection that is dead but has not been CLOSED, which the
+-- socket alone cannot tell us. This is not hypothetical: on 2026-08-12
+-- the laptop's DHCP lease moved it from .106 to .104 while the dashboard
+-- was running. The backend's side went away, but no FIN or RST ever
+-- reached the Kindle, so its socket sat in ESTABLISHED and the daemon
+-- kept "sending" -- `netstat` on the device showed 382 bytes of the
+-- user's taps stuck in the send queue, addressed to an IP that no longer
+-- existed. The dashboard displayed ONLINE and accepted taps for 25
+-- minutes while doing absolutely nothing.
+--
+-- Note what does NOT solve this: polling more often. Nothing arrives to
+-- wake poll() at any interval, which is why the flat 500ms tick this
+-- daemon used for months was equally blind.
+--
+-- So the daemon pings the server itself rather than relying on the
+-- server's own keepalive (uvicorn's default is every 20s, but that is a
+-- server-side setting this project doesn't control and shouldn't depend
+-- on). RFC 6455 obliges any server to answer a ping with a pong, so a
+-- reply is guaranteed on a live connection.
+--
+-- The timeout is 3x the ping interval: one lost ping over flaky wifi --
+-- and this device's wifi is historically the least reliable part of the
+-- system -- must not tear down a working connection.
+local WS_PING_INTERVAL_MS = 30 * 1000
+local WS_SILENCE_TIMEOUT_MS = 90 * 1000
+local last_ws_rx_ms = 0   -- last time the socket had anything to read
+local last_ws_ping_ms = 0 -- last time we sent a ping
+
 -- Monotonic-ish clock in milliseconds, read from /proc/uptime (plain
 -- text, no FFI needed). We deliberately do NOT use os.clock(): that
 -- measures CPU time, not wall-clock time, and barely advances while this
@@ -337,6 +367,11 @@ local function try_connect()
     end
     conn = c
     conn_status = "connecting"
+    -- Start the watchdog clocks from the attempt, not from zero: a fresh
+    -- connection must not be judged silent for time that elapsed before
+    -- it existed.
+    last_ws_rx_ms = now_ms()
+    last_ws_ping_ms = now_ms()
 end
 
 -- ===================== dashboard state + redraw =====================
@@ -981,18 +1016,29 @@ local function compute_poll_timeout()
         if remaining < timeout then timeout = remaining end
     end
 
+    -- Connection work runs whether or not the screen is locked, because
+    -- the WebSocket block in the loop is not gated on the lock either --
+    -- a link that dies while locked should be found and re-established
+    -- before the user unlocks, not after.
+    if conn then
+        if conn_status == "open" then
+            until_deadline(last_ws_ping_ms + WS_PING_INTERVAL_MS)
+            until_deadline(last_ws_rx_ms + WS_SILENCE_TIMEOUT_MS)
+        end
+    else
+        until_deadline(next_reconnect_at)
+    end
+
     if screen_locked then
         -- Locked suspends the clock redraw, the battery poll and touch
         -- handling, so none of their deadlines are live -- and including
         -- them here would be actively wrong: they are left in the PAST
         -- while locked (nothing advances them), so they would pin every
         -- wait to the floor and burn exactly the power locking is meant
-        -- to save. Reconnect is the only thing still on a timer.
-        if not conn then until_deadline(next_reconnect_at) end
+        -- to save.
     else
         until_deadline(last_clock_redraw_ms + config.clock_redraw_interval_ms)
         until_deadline(last_battery_poll_ms + BATTERY_POLL_INTERVAL_MS)
-        if not conn then until_deadline(next_reconnect_at) end
         if flash_expire_at_ms then until_deadline(flash_expire_at_ms) end
         if armed_delete_id ~= nil then until_deadline(armed_delete_until_ms) end
         if AUTO_LOCK_IDLE_MS then until_deadline(last_input_ms + AUTO_LOCK_IDLE_MS) end
@@ -1122,7 +1168,16 @@ while true do
         -- --- websocket ---
         if conn then
             local prev_status = conn_status
-            local events = conn:step(results[conn.fd])
+            local ws_ready = results[conn.fd]
+            -- Anything at all arriving counts as proof of life -- a state
+            -- push, a pong, even the server closing. Keyed off the socket
+            -- being readable rather than off any particular frame type,
+            -- so pings/pongs handled inside websocket.lua (which emit no
+            -- event here) still count.
+            if ws_ready and ws_ready.readable then
+                last_ws_rx_ms = now_ms()
+            end
+            local events = conn:step(ws_ready)
             for _, ev in ipairs(events) do
                 if ev.type == "open" then
                     conn_status = "open"
@@ -1170,6 +1225,43 @@ while true do
             end
             if conn_status ~= prev_status and conn_status ~= "open" then
                 redraw_if_showing_state("connection status changed to " .. conn_status)
+            end
+
+            -- --- connection watchdog (see WS_PING_INTERVAL_MS above) ---
+            -- Only meaningful once the handshake has completed: a
+            -- half-finished connection has nothing to ping with, and its
+            -- own failure is reported through conn:step() instead.
+            if conn and conn_status == "open" then
+                local now = now_ms()
+                if (now - last_ws_ping_ms) >= WS_PING_INTERVAL_MS then
+                    last_ws_ping_ms = now
+                    local ping_ok, ping_err = conn:send_ping()
+                    if not ping_ok then
+                        -- Not fatal on its own: the send may simply not
+                        -- have flushed yet. If the connection really is
+                        -- gone, the silence check below is what acts.
+                        log.warn("ws: ping failed to send: " .. tostring(ping_err))
+                    end
+                end
+
+                if (now - last_ws_rx_ms) >= WS_SILENCE_TIMEOUT_MS then
+                    log.warn(string.format(
+                        "ws: nothing received for %ds despite pinging -- treating the " ..
+                        "connection as dead and reconnecting (the laptop's IP may have " ..
+                        "changed; if this repeats, restart the dashboard so it is " ..
+                        "detected again)", math.floor(WS_SILENCE_TIMEOUT_MS / 1000)))
+                    conn:close()
+                    conn = nil
+                    conn_status = "offline"
+                    next_reconnect_at = now + reconnect_backoff_ms
+                    reconnect_backoff_ms =
+                        math.min(reconnect_backoff_ms * 2, config.reconnect_max_ms)
+                    -- Repaint so the badge stops claiming ONLINE. This is
+                    -- the user-visible point of the whole watchdog: a
+                    -- dashboard that knows it is offline is honest, even
+                    -- when it cannot fix itself.
+                    redraw_if_showing_state("connection watchdog: link is dead")
+                end
             end
         elseif now_ms() >= next_reconnect_at then
             try_connect()

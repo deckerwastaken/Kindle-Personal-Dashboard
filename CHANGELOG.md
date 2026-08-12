@@ -182,6 +182,18 @@ something you can rely on and something you can't:
 - **If your laptop goes to sleep, the Kindle reconnects on its own** when
   it comes back, waiting a little longer between attempts each time
   instead of hammering the network.
+- **It tells you when it has lost touch with your laptop.** There's a
+  situation where the link between the two dies without either side being
+  told — most often when your router hands the laptop a different address
+  while the dashboard is running. The Kindle used to carry on as if
+  nothing had happened: still showing ONLINE, still accepting taps, and
+  quietly throwing every one of them away. Now it checks in with the
+  laptop every 30 seconds, and if it hears nothing back for a minute and a
+  half it says OFFLINE and starts trying to reconnect. If the laptop was
+  just asleep or the WiFi hiccupped, it sorts itself out with no help from
+  you. If the laptop's address genuinely changed, it can't guess the new
+  one — but the screen now tells you the truth instead of pretending, and
+  double-clicking `Start_Dashboard.bat` puts it right.
 - **Your tasks survive a crash.** If the file holding them is ever
   damaged, it's kept as a backup copy rather than thrown away.
 

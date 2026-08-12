@@ -152,6 +152,23 @@ function Conn:send_text(str)
     return ok, err
 end
 
+--- Send a WebSocket ping (opcode 0x9). RFC 6455 REQUIRES the peer to
+--- answer with a pong, so this is a liveness check that works regardless
+--- of whether the server is configured to ping us -- which matters,
+--- because the daemon otherwise has no way to tell a healthy idle
+--- connection from a dead one. See daemon.lua's connection watchdog.
+---
+--- The pong that comes back needs no handling of its own: the watchdog
+--- keys off the socket becoming readable at all, not off the frame type
+--- (see the opcode 0xA branch in Conn:step, which stays a no-op).
+function Conn:send_ping(payload)
+    if self.state ~= "open" then
+        return false, "not connected"
+    end
+    self.write_buf = self.write_buf .. encode_frame(0x9, payload or "")
+    return try_flush_write(self)
+end
+
 function Conn:close()
     if self.fd then posix.close(self.fd) end
     self.state = "closed"

@@ -37,6 +37,8 @@ local POLL_FLOOR_MS = 500          -- = max(config.poll_timeout_ms, 50)
 local POLL_CEILING_MS = 60 * 1000
 local BATTERY_POLL_INTERVAL_MS = 60 * 1000
 local CLOCK_REDRAW_INTERVAL_MS = 60 * 1000 -- = config.clock_redraw_interval_ms
+local WS_PING_INTERVAL_MS = 30 * 1000
+local WS_SILENCE_TIMEOUT_MS = 90 * 1000
 
 local function compute_poll_timeout(s)
     local now = s.now
@@ -48,12 +50,20 @@ local function compute_poll_timeout(s)
         if remaining < timeout then timeout = remaining end
     end
 
+    if s.conn then
+        if s.conn_status == "open" then
+            until_deadline(s.last_ws_ping_ms + WS_PING_INTERVAL_MS)
+            until_deadline(s.last_ws_rx_ms + WS_SILENCE_TIMEOUT_MS)
+        end
+    else
+        until_deadline(s.next_reconnect_at)
+    end
+
     if s.screen_locked then
-        if not s.conn then until_deadline(s.next_reconnect_at) end
+        -- deliberately nothing: see the original's comment
     else
         until_deadline(s.last_clock_redraw_ms + CLOCK_REDRAW_INTERVAL_MS)
         until_deadline(s.last_battery_poll_ms + BATTERY_POLL_INTERVAL_MS)
-        if not s.conn then until_deadline(s.next_reconnect_at) end
         if s.flash_expire_at_ms then until_deadline(s.flash_expire_at_ms) end
         if s.armed_delete_id ~= nil then until_deadline(s.armed_delete_until_ms) end
         if s.auto_lock_idle_ms then until_deadline(s.last_input_ms + s.auto_lock_idle_ms) end
@@ -68,6 +78,22 @@ end
 --- this file is asserting about.
 local function run_timed_blocks(s)
     local now = s.now
+
+    -- connection watchdog. `s.server_replies` models a live peer: on a
+    -- healthy link the pong (or any other frame) makes the socket
+    -- readable, which is what refreshes last_ws_rx_ms in the real loop.
+    if s.conn and s.conn_status == "open" then
+        if (now - s.last_ws_ping_ms) >= WS_PING_INTERVAL_MS then
+            s.last_ws_ping_ms = now
+            if s.server_replies then s.last_ws_rx_ms = now end
+        end
+        if (now - s.last_ws_rx_ms) >= WS_SILENCE_TIMEOUT_MS then
+            s.conn = false
+            s.conn_status = "offline"
+            s.next_reconnect_at = now + 2000
+            s.watchdog_fired = (s.watchdog_fired or 0) + 1
+        end
+    end
 
     -- delete-confirmation expiry
     if s.armed_delete_id ~= nil and now >= s.armed_delete_until_ms then
@@ -126,6 +152,10 @@ local function new_state(over)
         now = 100000, -- a device that has been up a while, as it always has
         screen_locked = false,
         conn = true,
+        conn_status = "open",
+        server_replies = true, -- a healthy peer answers pings
+        last_ws_rx_ms = 100000,
+        last_ws_ping_ms = 100000,
         next_reconnect_at = 0,
         last_clock_redraw_ms = 100000,
         last_battery_poll_ms = 100000,
@@ -163,12 +193,15 @@ local function wakeups_over(s, duration_ms)
 end
 
 local HOUR = 60 * 60 * 1000
--- One wakeup per minute, set by the clock redraw and battery poll (both
--- on 60s) and by the ceiling, which is deliberately no lower. The number
--- that matters is that it is ~60 and not the 7200 a flat 500ms tick
--- produces. This bound is also what caught the ceiling being set at 30s,
--- which quietly doubled it for nothing.
-local IDLE_WAKEUPS_PER_HOUR_MAX = 65
+-- Two wakeups per minute: the 30s liveness ping, which subsumes the 60s
+-- clock redraw and battery poll. That is a deliberate, priced decision --
+-- the ping doubled this from 60/hour, and it buys the ability to notice
+-- a dead connection at all, which cost a user 25 minutes of tapping a
+-- dashboard that had silently stopped talking to the laptop. The number
+-- that matters is that it is ~120 and not the 7200 a flat 500ms tick
+-- produces; the extra 60 wakeups an hour are well under a second of CPU
+-- a day, measured.
+local IDLE_WAKEUPS_PER_HOUR_MAX = 125
 
 print("=== idle dashboard sleeps to the next deadline, not on a tick ===")
 do
@@ -180,11 +213,19 @@ do
     -- assertion above can't quietly regress toward it.
     check("...which is far below the old flat 500ms tick (7200/hr)", n < 7200 / 10,
         n .. " wakeups")
-    -- A full minute in one poll() call, not two half-minutes: the ceiling
-    -- must never bind below the soonest real deadline.
-    check_eq("an idle wait is a full clock interval", compute_poll_timeout(new_state()),
-        CLOCK_REDRAW_INTERVAL_MS)
-    check("...so the ceiling is not set below it", POLL_CEILING_MS >= CLOCK_REDRAW_INTERVAL_MS)
+    -- The soonest real deadline on a connected, idle dashboard is the
+    -- liveness ping. Nothing may bind below it -- the ceiling sitting at
+    -- 30s once did, splitting every sleep in two for no benefit.
+    check_eq("an idle wait runs to the liveness ping", compute_poll_timeout(new_state()),
+        WS_PING_INTERVAL_MS)
+    check("...and the ceiling is not set below the clock interval",
+        POLL_CEILING_MS >= CLOCK_REDRAW_INTERVAL_MS)
+
+    -- Disconnected and with nothing scheduled, the ceiling is what's left.
+    check_eq("with no connection and no deadlines, the ceiling applies",
+        compute_poll_timeout(new_state({ conn = false, conn_status = "offline",
+                                         next_reconnect_at = 100000 + 10 * HOUR })),
+        POLL_CEILING_MS)
 end
 
 print("\n=== the keyboard screen does not spin (no clock draw to stamp) ===")
@@ -215,24 +256,72 @@ do
         last_clock_redraw_ms = 0,   -- long overdue
         last_battery_poll_ms = 0,   -- long overdue
     })
-    check_eq("locked + overdue timers waits the full ceiling",
-        compute_poll_timeout(s), POLL_CEILING_MS)
+    -- The ping still applies (liveness is not suspended by the lock), but
+    -- the two overdue suspended timers must not drag the wait down to the
+    -- floor -- that would burn more power locked than unlocked.
+    check_eq("locked + overdue suspended timers still waits for the ping",
+        compute_poll_timeout(s), WS_PING_INTERVAL_MS)
+
+    local locked_disconnected = new_state({
+        screen_locked = true, conn = false, conn_status = "offline",
+        last_clock_redraw_ms = 0, last_battery_poll_ms = 0,
+        next_reconnect_at = 100000 + 10 * HOUR,
+    })
+    check_eq("...and with no connection either, the full ceiling",
+        compute_poll_timeout(locked_disconnected), POLL_CEILING_MS)
 
     local n = wakeups_over(s, HOUR)
     check(string.format("locked for an hour wakes %d times", n),
-        n <= (HOUR / POLL_CEILING_MS) + 2)
+        n <= IDLE_WAKEUPS_PER_HOUR_MAX)
     check("...and stays locked (nothing unlocks itself)", s.screen_locked)
+    check("...and the link stayed up the whole time", s.conn and s.watchdog_fired == nil)
 end
 
 print("\n=== locked but disconnected still honours reconnect timing ===")
 do
-    local s = new_state({ screen_locked = true, conn = false,
+    local s = new_state({ screen_locked = true, conn = false, conn_status = "offline",
                           next_reconnect_at = 100000 + 4000 })
     check_eq("waits until the reconnect deadline", compute_poll_timeout(s), 4000)
 
-    local far = new_state({ screen_locked = true, conn = false,
+    local far = new_state({ screen_locked = true, conn = false, conn_status = "offline",
                             next_reconnect_at = 100000 + 10 * 60 * 1000 })
     check_eq("but never longer than the ceiling", compute_poll_timeout(far), POLL_CEILING_MS)
+end
+
+print("\n=== connection watchdog (the half-open socket that started this) ===")
+do
+    -- A healthy link answers pings, so it must never be torn down.
+    local healthy = new_state({ server_replies = true })
+    wakeups_over(healthy, 4 * HOUR)
+    check("a healthy link survives four hours untouched",
+        healthy.conn and healthy.watchdog_fired == nil)
+
+    -- A peer that vanished without closing the socket: exactly the
+    -- 2026-08-12 case, where the laptop's IP moved and the Kindle's
+    -- socket stayed ESTABLISHED with the user's taps stuck in its send
+    -- queue. Nothing arrives, so only the silence timeout can catch it.
+    local dead = new_state({ server_replies = false })
+    wakeups_over(dead, 5 * 60 * 1000)
+    check("a silent peer is detected", dead.watchdog_fired ~= nil,
+        "the dashboard would keep claiming ONLINE")
+    check_eq("...and the connection is dropped", dead.conn, false)
+    check_eq("...and it goes offline rather than pretending", dead.conn_status, "offline")
+
+    -- Detection has to be prompt enough to be useful, and patient enough
+    -- to survive one lost ping on this device's historically flaky wifi.
+    local t = new_state({ server_replies = false })
+    local start = t.now
+    while t.conn and t.now - start < 10 * 60 * 1000 do
+        t.now = t.now + compute_poll_timeout(t)
+        run_timed_blocks(t)
+    end
+    local took = t.now - start
+    check(string.format("detected in %ds (>60s, <=120s)", took / 1000),
+        took > 60 * 1000 and took <= 120 * 1000)
+    check("...which is more than one missed ping", took > WS_PING_INTERVAL_MS)
+
+    -- And it must not thrash: once dropped, reconnect timing takes over.
+    check("a dropped link schedules a reconnect", t.next_reconnect_at > t.now - 1)
 end
 
 print("\n=== short-lived UI timers are not slept through ===")
@@ -272,7 +361,7 @@ do
     -- screen_locked guard stops it.
     local n = wakeups_over(s, HOUR)
     check(string.format("stays quiet afterwards (%d wakeups in the next hour)", n),
-        n <= (HOUR / POLL_CEILING_MS) + 2)
+        n <= IDLE_WAKEUPS_PER_HOUR_MAX)
 
     -- Input postpones it. A dashboard being used should never blank.
     local used = new_state({ auto_lock_idle_ms = FIFTEEN })
