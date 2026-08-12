@@ -48,6 +48,14 @@ safely, so a reboot is the one path that's actually been proven to work.)
 - If `Start_Dashboard.bat` reports a crash instead of success, the
   Kindle's screen won't have switched over — your book/KOReader session
   is untouched and safe.
+- **A screen showing just the word "Locked" is normal, not a crash.** The
+  dashboard locks itself after 15 minutes of nobody touching it, to save
+  battery; the power button locks and unlocks it on demand too. Press the
+  power button once and the dashboard comes straight back on whatever tab
+  it was on. (An entirely *blank* screen with no word on it is a different
+  thing and does mean something went wrong — check
+  `/mnt/us/kindle-daemon/daemon.log`.) To turn the automatic lock off, set
+  `auto_lock_idle_ms = 0` in the Kindle's `src/config.lua`.
 
 ## Resolved issue: starting the dashboard used to reboot the Kindle
 

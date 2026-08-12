@@ -151,20 +151,21 @@ end
 
 --- Tap targets below 40px, knowingly tolerated.
 ---
---- refresh_usage_button: PRE-EXISTING, not introduced by any of the work
---- this test was written alongside. The CLAUDE USAGE card's Refresh
---- control is drawn as a 22x22 icon button with its hit zone padded 1px
---- in each direction, i.e. 24x24 -- well under the 40px floor every
---- other target in ui.lua meets, and under the sizes that file's own
---- comments argue for at length (checkbox 40, task row 56, nav tab 64,
---- footer buttons grown 32 -> 48 specifically for this reason).
+--- Currently EMPTY, and that is the point -- every hit zone ui.lua emits
+--- now meets the 40px floor.
 ---
---- Listed here rather than fixed, because widening it is a real UI
---- change to a shipped, working control and not part of what this test
---- was added to verify. Naming it explicitly keeps it visible without
---- letting it mask a genuinely NEW undersized target, which is what
---- deleting the check entirely would do.
-local KNOWN_SMALL_ZONES = { refresh_usage_button = true }
+--- It used to hold refresh_usage_button: the CLAUDE USAGE card's Refresh
+--- control was a 22x22 icon button with its zone padded 1px each way,
+--- i.e. 24x24, the one target under the floor every other control meets
+--- (checkbox 40, task row 56, nav tab 64, footer buttons grown 32 -> 48
+--- specifically for this reason). It was listed rather than fixed
+--- because widening it was a real UI change to a shipped control. That
+--- change has since been made -- the whole card is the tap target now
+--- (see ui.lua) -- so the exception is gone rather than kept as dead
+--- tolerance. The table itself stays: the check reads better with a
+--- named place to record a deliberate exception, and an empty one
+--- documents that there are none.
+local KNOWN_SMALL_ZONES = {}
 
 local function check_zones_sane(label, zones)
     local bad = {}
@@ -627,10 +628,10 @@ do
         active_tab_of(restored2), "Today")
 end
 
-print("\n=== locked (blank) screen ===")
+print("\n=== locked screen ===")
 do
     local ops, zones = render(ui.draw_blank_screen)
-    check_in_bounds("blank screen", ops)
+    check_in_bounds("locked screen", ops)
     check("locked screen registers NO hit zones", #zones == 0, #zones .. " zones")
 
     -- It must actually cover the whole display: a blank that missed a
@@ -642,10 +643,24 @@ do
     end
     check("blanks the entire 600x800 screen", covers)
 
-    -- And it must be genuinely blank -- no leftover text of any kind.
-    local text_count = 0
-    for _, o in ipairs(ops) do if o.op == "text" then text_count = text_count + 1 end end
-    check("draws no text at all", text_count == 0, text_count .. " text draws")
+    -- Exactly one thing survives the blank: the word itself. More than
+    -- one text draw here would mean something else leaked onto a screen
+    -- whose whole job is to show nothing else.
+    local texts = {}
+    for _, o in ipairs(ops) do if o.op == "text" then texts[#texts + 1] = o end end
+    check_eq("draws exactly one label", #texts, 1)
+    if #texts == 1 then
+        local t = texts[1]
+        check_eq("the label reads 'Locked'", t.text, "Locked")
+
+        -- Centered by computation in ui.lua, so verify against the same
+        -- geometry rather than against a copied literal: a hand-typed
+        -- expected pixel would keep passing if char_w() were corrected
+        -- and the label silently went off-center.
+        local w = #t.text * 8 * t.size
+        check_eq("horizontally centered", t.x, math.floor((L.screen_w - w) / 2))
+        check_eq("vertically centered", t.y, math.floor((L.screen_h - 8 * t.size) / 2))
+    end
 end
 
 print("\n=== other screens still render cleanly ===")

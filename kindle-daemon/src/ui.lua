@@ -1194,14 +1194,37 @@ function M.draw_dashboard(state, conn_status, task_page, armed_delete_id, batter
     for _, r in ipairs(REFRESH_ICON_RECTS) do
         M.fill_rect(refresh_btn_x + r[1], row3_y + r[2], r[3], r[4], "WHITE")
     end
+    -- CHANGED (2026-08-12, user request): the tap target is now the WHOLE
+    -- card -- its "CLAUDE USAGE" label, the percentage, the bar, the
+    -- resets line and the icon -- not just the icon itself.
+    --
+    -- The icon's own zone was 24x24 (22px button padded 1px), the single
+    -- target in this file under the 40px floor everything else meets, and
+    -- it was recorded as a known exception in tests/test_layout.lua
+    -- rather than fixed. Widening the icon alone would have cost vertical
+    -- budget this card does not have (see usage_card_h's comment: it has
+    -- already been trimmed twice to fund the footer). Making the card
+    -- itself the target costs no layout at all and gives a 552x110
+    -- region, which on an IR panel whose calibration is still unconfirmed
+    -- is the difference between "usually works" and "always works".
+    --
+    -- The icon stays drawn: it is the only thing on the card that says
+    -- the card DOES anything, and losing it would leave a tappable
+    -- region with no affordance at all.
+    --
+    -- Spans from the label down to the bottom of the box. Nothing else is
+    -- registered in this band -- the task list's worst case ends at
+    -- L.task_list_max_bottom_y, which is where this card's own position
+    -- is anchored from, and the footer starts at L.footer_y below it --
+    -- so this cannot swallow another control the way the task swipe area
+    -- once did (see tests/test_hit_resolution.lua). The kind is unchanged
+    -- so daemon.lua's handler needs no edit; only the geometry moved.
     hit_zones[#hit_zones + 1] = {
         kind = "refresh_usage_button",
-        -- Padded 1px beyond the visible box in every direction -- still
-        -- safely clear of the progress bar above (bar bottom is
-        -- card_box_y+46, this zone's top is card_box_y+53) and the
-        -- card's own bottom edge (box bottom is card_box_y+78, this
-        -- zone's bottom is card_box_y+77).
-        x = refresh_btn_x - 1, y = row3_y - 1, w = refresh_btn_size + 2, h = refresh_btn_size + 2,
+        x = L.margin,
+        y = card_y,
+        w = L.screen_w - 2 * L.margin,
+        h = (card_box_y + L.usage_card_h) - card_y,
     }
 
     -- --- footer controls: Exit Dashboard / Restart SSH ---
@@ -1808,10 +1831,8 @@ function M.draw_confirm_exit()
     return hit_zones
 end
 
---- Blanks the screen for the locked state (power button, see daemon.lua).
----
---- Plain WHITE, with nothing drawn on it at all -- the "full blank
---- screen" this was asked for.
+--- Draws the locked screen (power button or the idle auto-lock, both in
+--- daemon.lua): a blank WHITE page with a single centered "Locked".
 ---
 --- WHITE rather than BLACK for two reasons. E-ink holds either state
 --- with zero power, so there is no power argument between them, but a
@@ -1819,6 +1840,21 @@ end
 --- up persistent ghosting that a later screen has to fight; and a black
 --- rectangle on a Kindle reads as "broken/asleep mid-refresh" whereas a
 --- blank white page reads as "off", which is what the state actually is.
+---
+--- CHANGED (2026-08-12, user request): this screen was originally
+--- COMPLETELY blank, which was the right first cut but had one real
+--- problem -- an empty white page is visually indistinguishable from a
+--- daemon that has silently died, and this device has a documented
+--- history of exactly that (see ops/README.md's notes on the luajit
+--- process vanishing from `ps` with no crash trace). The word is the
+--- whole fix: it says the state is deliberate and recoverable, i.e.
+--- "press the power button again", rather than leaving the user to
+--- guess whether the dashboard needs restarting from the laptop.
+---
+--- Centered by computation (text_w/char_w and the confirmed 8px-per-size
+--- -unit glyph box), not by a hand-placed pixel offset -- so it stays
+--- centered if char_w() is ever corrected, exactly like every other
+--- centered label in this file.
 ---
 --- Uses GC16 (full-quality) deliberately, and this is the one place in
 --- this file where the slowest waveform is the RIGHT choice: it fully
@@ -1832,6 +1868,17 @@ end
 --- dashboard in a bag should not be tappable.
 function M.draw_blank_screen()
     M.fill_rect(0, 0, L.screen_w, L.screen_h, "WHITE")
+    -- Size 3, matching draw_shutdown_message's terminal notice below --
+    -- both are "the dashboard is not currently a dashboard" states, and
+    -- reading them from across a desk matters more than subtlety. Size 4
+    -- is reserved for the clock, which is the one deliberate visual
+    -- anchor of the normal screen.
+    local label = "Locked"
+    local size = 3
+    M.draw_text(
+        math.floor((L.screen_w - text_w(label, size)) / 2),
+        math.floor((L.screen_h - 8 * size) / 2),
+        label, { size = size })
     M.flush("GC16")
     return {}
 end

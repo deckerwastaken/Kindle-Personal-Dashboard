@@ -199,6 +199,27 @@ local FLASH_DURATION_MS = 3000
 -- they're referenced and there is no hoisting.
 local screen_locked = false
 
+-- When the last real user input (tap, swipe, power button) happened.
+-- Backend state pushes deliberately do NOT count: the dashboard updating
+-- itself in the corner of the room is not somebody using it, and if it
+-- reset this the idle timer would never expire on a busy day.
+local last_input_ms = 0 -- set properly just before the main loop, once
+                         -- now_ms() has a real uptime to read
+
+-- Idle auto-lock: lock the screen after this long with no input, exactly
+-- as if the power button had been pressed (press it again to come back).
+--
+-- Read from config.lua if present, but defaulted HERE, for the same
+-- reason BATTERY_POLL_INTERVAL_MS is a constant: config.lua is a file
+-- every existing install already has on the device (it's gitignored and
+-- device-local), so a setting that only exists in config.example.lua
+-- would be nil on every machine this is deployed to and the feature
+-- would silently never run. Set `auto_lock_idle_ms = 0` in config.lua to
+-- turn it off.
+local AUTO_LOCK_IDLE_MS = config.auto_lock_idle_ms
+if AUTO_LOCK_IDLE_MS == nil then AUTO_LOCK_IDLE_MS = 15 * 60 * 1000 end
+if AUTO_LOCK_IDLE_MS <= 0 then AUTO_LOCK_IDLE_MS = nil end
+
 local function show_flash(text)
     -- Toasts draw straight to the screen rather than going through
     -- redraw(), so redraw()'s own lock guard doesn't cover them. This is
@@ -477,6 +498,12 @@ local function set_screen_locked(locked, reason)
         end
     else
         log.info("screen UNLOCKED (" .. reason .. ") -- restoring " .. ui_mode)
+        -- Unlocking IS input. Without this the idle timer would still be
+        -- measuring from the last tap before the lock, so a screen
+        -- unlocked after a long idle period would re-lock itself on the
+        -- very next check -- pressing power would look like it did
+        -- nothing at all.
+        last_input_ms = now_ms()
         redraw("unlocked")
     end
 end
@@ -879,6 +906,11 @@ local function handle_gesture(gesture)
         return
     end
 
+    -- Feeds the idle auto-lock. Set for EVERY gesture kind, including the
+    -- inert "drag" below: a drag is a finger on the glass, so it means
+    -- somebody is here, even though nothing on screen acts on it.
+    last_input_ms = now_ms()
+
     if gesture.kind == "tap" then
         handle_tap(gesture.x, gesture.y)
     elseif gesture.kind == "swipe" then
@@ -894,10 +926,92 @@ local function handle_gesture(gesture)
     end
 end
 
+-- ===================== poll pacing (power) =====================
+--
+-- The loop used to wait a flat config.poll_timeout_ms (500ms) on every
+-- iteration, so the CPU woke twice a second forever, whether or not
+-- there was anything to do. That is pure waste on a battery device:
+-- poll() returns the INSTANT a touch, a power-button press or a
+-- WebSocket byte arrives regardless of the timeout, so the timeout only
+-- ever governs work that is driven by a DEADLINE, never responsiveness.
+--
+-- So: sleep until the nearest real deadline instead of on a fixed tick.
+-- Idle wakeups drop from ~2/second to ~1/minute (the clock redraw and
+-- battery poll, the only recurring deadlines) and to nearly none while
+-- locked, where even those are suspended. Touch and unlock latency are
+-- completely unchanged -- they never depended on this number.
+--
+-- config.poll_timeout_ms is still honoured, now as the FLOOR: no wait is
+-- ever shortened below it, so an install that tuned it down for
+-- responsiveness still gets what it asked for.
+local POLL_FLOOR_MS = math.max(config.poll_timeout_ms or 500, 50)
+
+-- Longest a single poll() may wait. Bounds the case where nothing at all
+-- is scheduled (essentially: while locked), and keeps one loop iteration
+-- a bounded unit of time so anything ever added to the loop can't be
+-- starved for minutes.
+--
+-- 60s, matching the clock redraw interval, deliberately: a lower ceiling
+-- binds BELOW the soonest real deadline on an idle dashboard and splits
+-- every one-minute sleep into two for no benefit -- tests/test_poll_pacing
+-- .lua measured exactly that (120 wakeups an hour at a 30s ceiling
+-- against the 60 the deadlines actually allow).
+local POLL_CEILING_MS = 60 * 1000
+
+--- How long poll() should wait this iteration: the time until the
+--- soonest deadline any of the loop's timer-driven blocks is waiting on,
+--- clamped to [POLL_FLOOR_MS, POLL_CEILING_MS].
+---
+--- Every deadline considered here MUST correspond to a block below that
+--- unconditionally advances it when it fires. If one ever fires without
+--- moving forward, this returns the floor every iteration for as long as
+--- that lasts -- a busy loop, not a hang, but the exact opposite of the
+--- point. That is not hypothetical: the periodic clock tick had this
+--- shape already (redraw_if_dashboard does nothing while the keyboard is
+--- up, and redraw() only stamps last_clock_redraw_ms on a draw that
+--- actually happened), which the flat 500ms tick hid. See the clock
+--- block in the loop for the fix that makes it hold.
+local function compute_poll_timeout()
+    local now = now_ms()
+    local timeout = POLL_CEILING_MS
+
+    local function until_deadline(deadline)
+        if deadline == nil then return end
+        local remaining = deadline - now
+        if remaining < timeout then timeout = remaining end
+    end
+
+    if screen_locked then
+        -- Locked suspends the clock redraw, the battery poll and touch
+        -- handling, so none of their deadlines are live -- and including
+        -- them here would be actively wrong: they are left in the PAST
+        -- while locked (nothing advances them), so they would pin every
+        -- wait to the floor and burn exactly the power locking is meant
+        -- to save. Reconnect is the only thing still on a timer.
+        if not conn then until_deadline(next_reconnect_at) end
+    else
+        until_deadline(last_clock_redraw_ms + config.clock_redraw_interval_ms)
+        until_deadline(last_battery_poll_ms + BATTERY_POLL_INTERVAL_MS)
+        if not conn then until_deadline(next_reconnect_at) end
+        if flash_expire_at_ms then until_deadline(flash_expire_at_ms) end
+        if armed_delete_id ~= nil then until_deadline(armed_delete_until_ms) end
+        if AUTO_LOCK_IDLE_MS then until_deadline(last_input_ms + AUTO_LOCK_IDLE_MS) end
+    end
+
+    if timeout < POLL_FLOOR_MS then return POLL_FLOOR_MS end
+    return timeout
+end
+
 -- ===================== main loop =====================
 
 redraw("startup")
 try_connect()
+
+-- Start the idle clock from here rather than from 0: /proc/uptime is
+-- already minutes old by the time the dashboard is started by hand over
+-- SSH, and a 0 would mean "idle since boot" -- the very first check
+-- would lock the screen the user just asked for.
+last_input_ms = now_ms()
 
 log.info("entering main loop")
 
@@ -916,16 +1030,17 @@ while true do
             poll_entries[#poll_entries + 1] = { fd = conn.fd, want_write = conn:wants_write() }
         end
 
+        local poll_timeout = compute_poll_timeout()
+
         local results
         if #poll_entries > 0 then
-            results = posix.poll(poll_entries, config.poll_timeout_ms)
+            results = posix.poll(poll_entries, poll_timeout)
         else
             results = {}
             -- nothing to poll (no touch device, no connection yet) --
             -- avoid a busy loop while we wait for reconnect timing
-            local remaining = config.poll_timeout_ms
-            if remaining > 0 then
-                os.execute("sleep " .. string.format("%.1f", remaining / 1000))
+            if poll_timeout > 0 then
+                os.execute("sleep " .. string.format("%.1f", poll_timeout / 1000))
             end
         end
 
@@ -990,6 +1105,13 @@ while true do
                         -- -- triggering on press would fire the toggle
                         -- on the way into a deliberate power-off too.
                         if ev.code == keys.KEY_POWER and ev.value == "release" then
+                            -- Also counts as input for the idle timer, so
+                            -- a deliberate lock-then-immediate-unlock
+                            -- gives a full fresh idle window. (The unlock
+                            -- side of set_screen_locked stamps it too;
+                            -- this covers the lock side, which returns
+                            -- early without redrawing.)
+                            last_input_ms = now_ms()
                             set_screen_locked(not screen_locked, "power button")
                         end
                     end
@@ -1158,6 +1280,44 @@ while true do
         if not screen_locked
             and (now_ms() - last_clock_redraw_ms) >= config.clock_redraw_interval_ms then
             redraw_if_dashboard("periodic clock tick")
+            -- redraw() stamps last_clock_redraw_ms, but only on a draw
+            -- that actually happened -- and redraw_if_dashboard draws
+            -- nothing while the keyboard or exit-confirm screen is up.
+            -- So the deadline can still be in the past here, and must be
+            -- pushed forward by hand or it stays permanently overdue.
+            -- Harmless on the old flat 500ms tick (it just re-checked and
+            -- did nothing); with compute_poll_timeout() now sleeping
+            -- until the nearest deadline, an overdue one that never
+            -- advances would pin every wait to the floor for as long as
+            -- that screen is up. See compute_poll_timeout's doc comment.
+            if (now_ms() - last_clock_redraw_ms) >= config.clock_redraw_interval_ms then
+                last_clock_redraw_ms = now_ms()
+            end
+        end
+
+        -- --- idle auto-lock ---
+        -- Same destination as a power-button press: blank + "Locked",
+        -- timers suspended, press power to come back. Deliberately runs
+        -- on every screen, not just the dashboard -- an Add Task keyboard
+        -- left untouched for a quarter of an hour is exactly as idle as a
+        -- task list, and unlocking restores it with its typed buffer
+        -- intact (see set_screen_locked's doc comment).
+        --
+        -- The `not screen_locked` guard is what stops this re-firing: a
+        -- locked screen leaves last_input_ms alone, so the condition
+        -- stays true for the whole locked period.
+        if AUTO_LOCK_IDLE_MS and not screen_locked
+            and (now_ms() - last_input_ms) >= AUTO_LOCK_IDLE_MS then
+            -- Stamped BEFORE the attempt, not after a success. If
+            -- blanking fails, set_screen_locked deliberately stays
+            -- unlocked (see its comment) -- without this, the condition
+            -- would still be true on the very next iteration and the
+            -- daemon would retry, and log the failure, at the floor
+            -- interval forever. Restarting the idle window instead means
+            -- a failed auto-lock is retried once every idle period.
+            last_input_ms = now_ms()
+            set_screen_locked(true, string.format("idle for %d min",
+                math.floor(AUTO_LOCK_IDLE_MS / 60000)))
         end
     end)
 

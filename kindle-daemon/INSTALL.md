@@ -234,6 +234,9 @@ What should happen:
 - Tapping "Habits" or "Home" should flash a small "coming soon" message
   near the bottom. Tapping "Learning" should switch to the Learning
   screen, and tapping "Today" should come back.
+- Tapping anywhere on the "CLAUDE USAGE" card should flash "Refreshing
+  usage..." -- the whole card is the button, not just the small icon in
+  its corner.
 
 Leave it running for a few minutes. Try:
 - Turning your laptop's WiFi off and back on, or restarting the backend
@@ -261,10 +264,16 @@ tells you what it tried.
 
 #### Testing the screen lock
 
-Press the Kindle's power button once: the screen should go completely
-blank. Tapping does nothing while it's blank (deliberate -- touch is
-locked out too). Press it again and the dashboard comes straight back on
-whatever tab you left it on.
+Press the Kindle's power button once: the screen should go blank apart
+from the word **Locked** in the middle. Tapping does nothing while it's
+locked (deliberate -- touch is locked out too). Press it again and the
+dashboard comes straight back on whatever tab you left it on.
+
+The same thing happens on its own after 15 minutes without a tap, swipe
+or button press, to save power. Change that with `auto_lock_idle_ms` in
+`src/config.lua`, or set it to `0` to keep the dashboard on screen until
+you lock it yourself. (You don't have to add the setting to get the
+15-minute default -- it's built into the daemon.)
 
 If the button does nothing, check what the daemon found at startup:
 

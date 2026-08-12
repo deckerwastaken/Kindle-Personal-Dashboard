@@ -83,10 +83,33 @@ return {
     reconnect_min_ms = 2000,
     reconnect_max_ms = 30000,
 
-    -- Main poll() loop timeout (milliseconds). Lower = more responsive
-    -- touch handling and more frequent clock-tick checks, at the cost of
-    -- slightly more CPU wakeups (irrelevant for battery life at this
-    -- scale, but keep it sane).
+    -- Lock the screen automatically after this long with no taps, swipes
+    -- or power-button presses (milliseconds) -- the same blank "Locked"
+    -- screen the power button gives, and the same press to come back.
+    -- This is the main power saving while the dashboard is left sitting
+    -- there: locking suspends the clock redraw, the battery read and
+    -- nearly all CPU wakeups.
+    --
+    -- Set to 0 to disable and keep the dashboard on screen until you
+    -- press the power button yourself.
+    --
+    -- If this key is missing entirely (an older config.lua), the daemon
+    -- uses the same 15 minutes, so an existing install doesn't have to be
+    -- edited to get the feature.
+    auto_lock_idle_ms = 15 * 60 * 1000,
+
+    -- Main poll() loop FLOOR (milliseconds) -- the shortest the daemon
+    -- will ever wait in one poll() call.
+    --
+    -- This used to be a fixed tick: the loop woke every 500ms whether or
+    -- not there was anything to do. It now sleeps until whichever piece
+    -- of timed work is due soonest (the clock redraw, the battery poll, a
+    -- toast expiring, a reconnect), which is usually a minute away and,
+    -- while locked, usually nothing at all -- so idle CPU wakeups drop by
+    -- roughly two orders of magnitude.
+    --
+    -- Touch and power-button latency do NOT depend on this: poll() wakes
+    -- the instant an event arrives, whatever the timeout was set to.
     poll_timeout_ms = 500,
 
     -- Shell command run by the on-screen "Restart SSH" button (see

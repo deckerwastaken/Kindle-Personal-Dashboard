@@ -130,6 +130,31 @@ decides which is which, and it also drives the bar's three visual states:
 active (inverted black), available (plain black text), unavailable
 (gray).
 
+### The Claude usage card
+
+Sits at a fixed position on the Today screen, above the footer controls,
+showing claude.ai's own "current session" rate-limit percentage, a
+progress bar and when it resets.
+
+**Tap anywhere on the card to refresh it** — the label, the percentage,
+the bar, the resets line, all of it — rather than only the small circular
+-arrow icon in its corner. The icon is still drawn, because it is the only
+thing that says the card *does* anything, but it is no longer the target.
+
+That icon's own hit zone was 24x24, the single tap target in `ui.lua`
+under the 40px floor everything else meets, and it was recorded as a known
+exception in `tests/test_layout.lua` rather than fixed. Widening the icon
+would have cost vertical budget this card does not have (`usage_card_h`
+has already been trimmed twice to fund the footer); making the card itself
+the target cost no layout at all and gives a 552x110 region. On an IR
+panel whose calibration has never been confirmed, that is the difference
+between "usually works" and "always works". `KNOWN_SMALL_ZONES` is now
+empty as a result.
+
+A refresh is rate-limited server-side (`backend/claude_session_usage.py`);
+a rejected repeat tap comes back as a toast, so tapping the card twice in
+quick succession tells you so rather than doing nothing.
+
 ### The Learning screen
 
 A dedicated full screen listing what you're working through -- online
@@ -178,11 +203,26 @@ smoothly, and every redraw is a visible flash). Two ways to move:
   computed *after* the screen transform, so `swap_xy`/`invert_*` can't
   produce a page turn that goes the opposite way from the user's thumb.
 
-### Screen lock (power button)
+### Screen lock (power button, and idle auto-lock)
 
-Pressing the Kindle's power button blanks the screen; pressing it again
-brings the dashboard back on whatever tab you left it on. `src/keys.lua`
-reads the button, `daemon.lua` owns the `screen_locked` flag.
+Pressing the Kindle's power button blanks the screen to a single centred
+**Locked**; pressing it again brings the dashboard back on whatever tab
+you left it on. `src/keys.lua` reads the button, `daemon.lua` owns the
+`screen_locked` flag.
+
+The screen also locks **by itself after 15 minutes with no taps, swipes
+or button presses** — same state, same way back. Configurable via
+`auto_lock_idle_ms` in `config.lua`; set it to `0` to switch it off. The
+default lives in `daemon.lua`, not only in `config.example.lua`, so an
+existing install picks the feature up without its device-local
+`config.lua` being edited.
+
+The word is not decoration. A completely blank Kindle is indistinguishable
+from a daemon that has silently died — something this device has a
+documented history of (see `ops/README.md`) — so an empty screen would
+leave you guessing whether to press the button or restart the dashboard
+from the laptop. This screen was fully blank until 2026-08-12 for exactly
+the reason it isn't now.
 
 **The point is power, and on e-ink a static image costs nothing to keep
 on screen** — all the power goes on screen *refreshes* and on the CPU
@@ -209,6 +249,32 @@ reliable part of the system (see `ops/README.md`). The bigger win, if
 this is ever worth pushing further, would be real suspend-to-RAM —
 `powerd` is still running and, confirmed on hardware, ignores the button
 entirely, so that avenue is open.
+
+### How often the daemon wakes up
+
+The main loop used to wait a flat `poll_timeout_ms` (500ms) every
+iteration, so the CPU woke twice a second forever, idle or not. It now
+sleeps until whichever piece of *timed* work is due soonest — the clock
+redraw, the battery poll, a toast expiring, a reconnect attempt, the idle
+auto-lock — which is roughly **60 wakeups an hour instead of 7200**.
+
+This costs nothing in responsiveness, and that is worth being precise
+about: `poll()` returns the instant a touch, a power-button press or a
+WebSocket byte arrives, whatever timeout it was given. The timeout only
+ever governed deadline-driven work. `poll_timeout_ms` is still honoured,
+now as the *floor*.
+
+The failure mode this introduces is the one to know about. A deadline
+that fires without being advanced sits permanently in the past, and every
+wait then collapses to the floor — a busy loop on a battery device. The
+flat tick hid exactly that, and one such deadline already existed: the
+periodic clock redraw goes through `redraw_if_dashboard()`, which draws
+nothing while the keyboard or exit-confirm screen is up, and only a real
+draw stamps `last_clock_redraw_ms`. The clock block now advances it
+either way. `tests/test_poll_pacing.lua` runs the loop's timers against a
+simulated clock and counts the wakeups, so this stays honest — **any new
+timed block in the main loop needs a deadline that always advances, and a
+case in that test.**
 
 CONFIRMED ON HARDWARE (2026-08-11): the button is the PMIC on-key
 (`max77696-onkey`, `/dev/input/event0`) and emits a clean
@@ -446,6 +512,10 @@ kindle-daemon/
                               CONSUMER resolves a tap to the wrong zone (which
                               is exactly how the full-region swipe zone once
                               swallowed every tap on the Today screen)
+    test_poll_pacing.lua   -- drives the main loop's timers against a simulated
+                              clock and counts wakeups, so an idle daemon is
+                              proven to sleep (~60/hour, not 7200) and a stale
+                              deadline can't quietly turn the loop into a spin
   tools/                  -- run these ON THE DEVICE over SSH
     evtest.lua            -- standalone raw touch-event dumper (manual test)
     tap_test.lua           -- exercises touch.lua's real gesture detection,

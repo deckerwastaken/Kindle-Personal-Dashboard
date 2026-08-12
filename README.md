@@ -35,7 +35,7 @@ docs/          -- setup guide, jailbreak reference, and secrets policy.
 
 ## Tests
 
-There are five suites. All of them run on your laptop with no Kindle, no
+There are six suites. All of them run on your laptop with no Kindle, no
 network, and nothing to install beyond what the backend already needs:
 
 ```
@@ -43,6 +43,7 @@ cd kindle-daemon/tests && luajit test_gestures.lua        # tap/swipe classifica
 cd kindle-daemon/tests && luajit test_keys.lua            # power button / screen lock
 cd kindle-daemon/tests && luajit test_layout.lua          # every screen's layout
 cd kindle-daemon/tests && luajit test_hit_resolution.lua  # what a tap actually hits
+cd kindle-daemon/tests && luajit test_poll_pacing.lua     # how often the daemon wakes
 python backend/tests/test_learnings.py                    # from the repo root
 ```
 
@@ -58,6 +59,13 @@ distinction is not academic — a bug that made the entire task area
 untappable was invisible to the layout test (the layout was perfectly
 self-consistent; the consumer resolved it wrong) and is caught
 immediately by this one.
+
+`test_poll_pacing.lua` is about battery rather than pixels. The daemon
+sleeps until its next piece of timed work instead of waking on a fixed
+tick (~60 wakeups an hour rather than 7200), which is only safe as long as
+every deadline actually moves forward when it fires — one that doesn't
+turns the loop into a spin. This suite runs those timers against a
+simulated clock and counts.
 
 Together they cover the arithmetic. They deliberately cannot tell you
 whether anything *looks* right on real e-ink — ghosting, whether the
