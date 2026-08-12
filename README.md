@@ -9,6 +9,9 @@ no third-party service — the backend runs on your own laptop.
 
 ## Start here
 
+Want to know what it actually does, in plain English? Read
+**`CHANGELOG.md`** — a no-jargon tour of every feature in version 2.
+
 New to this repo? Read **`docs/LAUNCH_GUIDE.md`** — the single
 start-to-finish setup walkthrough. It links out to more detailed guides
 for each piece as needed.
