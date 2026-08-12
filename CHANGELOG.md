@@ -189,11 +189,26 @@ something you can rely on and something you can't:
   nothing had happened: still showing ONLINE, still accepting taps, and
   quietly throwing every one of them away. Now it checks in with the
   laptop every 30 seconds, and if it hears nothing back for a minute and a
-  half it says OFFLINE and starts trying to reconnect. If the laptop was
-  just asleep or the WiFi hiccupped, it sorts itself out with no help from
-  you. If the laptop's address genuinely changed, it can't guess the new
-  one — but the screen now tells you the truth instead of pretending, and
-  double-clicking `Start_Dashboard.bat` puts it right.
+  half it says OFFLINE and starts trying to reconnect.
+- **And then it finds your laptop again by itself.** Your laptop quietly
+  announces its address on your home network every few seconds, and the
+  Kindle listens for that. So when the router changes your laptop's
+  address — moving house, a new router, or just your laptop reconnecting
+  to WiFi — the dashboard notices within about a minute and a half,
+  re-finds the laptop within a second, and carries on. No restarting
+  anything. This used to be the one failure you had to fix by hand.
+
+  You can turn it off (`discovery_enabled = false` on the Kindle,
+  `DISCOVERY_ENABLED=0` on the laptop). Worth knowing if you're deciding:
+  those announcements aren't password-protected, so in principle another
+  device on your home network could imitate one and point the dashboard
+  somewhere else. The Kindle refuses any address outside your own home
+  network, and nothing else in this project is password-protected either
+  — but it's your network and your call.
+- **The dashboard stays responsive while it's trying to reconnect.** A
+  long-standing bug meant that whenever the Kindle tried to reach a laptop
+  that wasn't there, the whole dashboard froze for the duration — taps,
+  the power button, the clock, everything. Fixed.
 - **Your tasks survive a crash.** If the file holding them is ever
   damaged, it's kept as a backup copy rather than thrown away.
 

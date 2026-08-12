@@ -250,6 +250,72 @@ this is ever worth pushing further, would be real suspend-to-RAM —
 `powerd` is still running and, confirmed on hardware, ignores the button
 entirely, so that avenue is open.
 
+### Finding the laptop again (discovery)
+
+The daemon is told the laptop's address once, at startup. When a DHCP
+lease moves the laptop mid-session, that address is simply wrong and
+nothing on the device can fix it — which is exactly what happened on
+2026-08-12, costing 25 minutes of taps that went nowhere.
+
+So the backend broadcasts `KDASH1 <ip> <port>` on UDP 8001 every 5s
+(`backend/discovery.py`), and `src/discovery.lua` listens for it.
+
+**A beacon is only acted on while the daemon is NOT connected.** A
+working connection already proves the address is right, and a beacon
+can't improve on that — but it *can* make things worse: a laptop with
+both wifi and ethernet may truthfully announce an address the Kindle has
+no route to, and adopting it would drop a healthy connection for a dead
+one. Waiting until we're offline costs nothing, because the case this
+exists for always breaks the connection first. The watchdog notices
+within 90s, and the next beacon is adopted within seconds. It also
+self-heals a daemon launched with a stale `LAPTOP_IP`.
+
+Beacons naming anything outside the private ranges are refused
+(`tests/test_discovery.lua`). That is a limit on blast radius, not real
+authentication: these broadcasts are unauthenticated, anything on your
+LAN can send one, and `discovery_enabled = false` in `config.lua` turns
+the whole thing off. The same trust model as the rest of the project —
+the WebSocket has no authentication either — but now one packet easier
+to abuse, which is a choice worth making deliberately.
+
+**The Kindle's firewall must allow the port, and this is not optional.**
+The INPUT chain's policy is DROP, and the rule that looks like a blanket
+`ACCEPT all` in `iptables -L INPUT -n` is scoped to `usb0` — you only see
+that with `-v`, which is what made the first reading of it wrong.
+`bin/run.sh` adds the rule at every start (rules don't survive a reboot).
+Verified in both directions: with the rule every beacon arrives; without
+it, the chain's drop counter rises by exactly the number sent and nothing
+is delivered. `tools/discovery_probe.lua` runs on the device and prints
+whatever reaches the port, which separates "the network is blocking it"
+from "it arrived and was rejected".
+
+### Sockets are non-blocking via SOCK_NONBLOCK, not fcntl — read this before touching posix.lua
+
+`fcntl(fd, F_SETFL, O_NONBLOCK)` **does not work through this FFI
+binding on this device.** The third argument is passed variadically and
+that marshalling silently fails: the call reports success, and the flag
+is not set. `F_GETFL` is unaffected (it ignores that argument), which is
+what makes `posix.is_nonblocking()` a trustworthy check.
+
+Sockets are therefore created with `SOCK_NONBLOCK` OR'd into `socket()`'s
+type argument, and `posix.ensure_nonblocking()` verifies it rather than
+assuming.
+
+This was live for months before anything noticed, because the symptoms
+don't look like a socket-flags problem:
+
+- `connect()` to an unreachable address **blocked the entire main
+  loop** — touch, the power button, redraws — until the kernel gave up.
+  Measured at 3 seconds to an unused LAN address; a black-holed one would
+  be far worse.
+- A read on an empty socket waited for data instead of returning EAGAIN.
+  The discovery reader drains until EAGAIN, so it sat through up to 16
+  beacon intervals per pass, turning a 1-second recovery into 35.
+
+Both were found by measuring, not by reading the code: the recovery was
+inexplicably ~35s, and the number only made sense as "16 reads × the 2.5s
+gap between beacons".
+
 ### How often the daemon wakes up
 
 The main loop used to wait a flat `poll_timeout_ms` (500ms) every
@@ -514,8 +580,13 @@ kindle-daemon/
                               swallowed every tap on the Today screen)
     test_poll_pacing.lua   -- drives the main loop's timers against a simulated
                               clock and counts wakeups, so an idle daemon is
-                              proven to sleep (~60/hour, not 7200) and a stale
-                              deadline can't quietly turn the loop into a spin
+                              proven to sleep (~120/hour, not 7200) and a stale
+                              deadline can't quietly turn the loop into a spin;
+                              also covers the connection watchdog
+    test_discovery.lua     -- beacon parsing and validation. The rejection cases
+                              are the feature: this parser decides where the
+                              daemon connects, and anything on the LAN can send
+                              it a beacon
   tools/                  -- run these ON THE DEVICE over SSH
     evtest.lua            -- standalone raw touch-event dumper (manual test)
     tap_test.lua           -- exercises touch.lua's real gesture detection,
@@ -524,6 +595,10 @@ kindle-daemon/
                               or to check the swipe thresholds feel right
     battery_probe.sh       -- dumps every battery interface this device really
                               exposes; use it if the battery reads "--%"
+    discovery_probe.lua    -- prints every UDP datagram reaching the discovery
+                              port. Tells "the firewall/AP is blocking beacons"
+                              apart from "they arrive and are rejected", which
+                              look identical from the daemon's side
     fbink_selftest.sh      -- standalone pixel-coordinate calibration test
   install/
     kindle-dashboard.conf  -- upstart job (optional boot-autostart, see

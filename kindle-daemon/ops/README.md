@@ -45,6 +45,15 @@ safely, so a reboot is the one path that's actually been proven to work.)
   `config.lua` required. (`config.lua`'s `laptop_ip` value is still there
   as a fallback for the manual SSH-testing steps in `INSTALL.md`, but the
   normal day-to-day path here always overrides it.)
+- **And if your laptop's address changes while the dashboard is already
+  running, it now recovers on its own** — the backend announces its
+  address on the network every few seconds and the Kindle re-finds it. In
+  practice: the badge goes OFFLINE within about 90 seconds of the link
+  dying, then back to ONLINE a second or two later. You don't have to do
+  anything. If it's still OFFLINE after a couple of minutes, then run
+  `Start_Dashboard.bat` — and if that doesn't fix it, check the laptop
+  backend is actually running (`Check_Status.bat`) before suspecting the
+  Kindle.
 - If `Start_Dashboard.bat` reports a crash instead of success, the
   Kindle's screen won't have switched over — your book/KOReader session
   is untouched and safe.

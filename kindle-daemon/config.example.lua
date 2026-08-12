@@ -83,6 +83,29 @@ return {
     reconnect_min_ms = 2000,
     reconnect_max_ms = 30000,
 
+    -- --- finding the laptop again after its IP changes ---
+    -- The backend broadcasts its own address on your network every few
+    -- seconds; the daemon listens for that and reconnects to the new
+    -- address by itself. Without this, a router handing your laptop a
+    -- different address mid-session leaves the dashboard stuck until you
+    -- run Start_Dashboard.bat again.
+    --
+    -- The daemon only acts on a beacon when it is NOT connected, so this
+    -- can never disturb a working connection.
+    --
+    -- Set discovery_enabled = false to switch it off and never open the
+    -- socket. Worth knowing if you're deciding: these beacons are
+    -- unauthenticated, so anything on your network could send a lookalike
+    -- and point the dashboard at a different backend. The daemon refuses
+    -- any address outside your own private network ranges, and this is
+    -- the same trust model the rest of the project already has (there's
+    -- no password on the WebSocket either) -- but it is your call.
+    --
+    -- Must match DISCOVERY_PORT in backend/.env if you change it. It is
+    -- also the port bin/run.sh opens in the Kindle's firewall.
+    discovery_enabled = true,
+    discovery_port = 8001,
+
     -- Lock the screen automatically after this long with no taps, swipes
     -- or power-button presses (milliseconds) -- the same blank "Locked"
     -- screen the power button gives, and the same press to come back.

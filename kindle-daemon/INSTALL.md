@@ -237,6 +237,13 @@ What should happen:
 - Tapping anywhere on the "CLAUDE USAGE" card should flash "Refreshing
   usage..." -- the whole card is the button, not just the small icon in
   its corner.
+- `grep discovery /mnt/us/kindle-daemon/daemon.log` should show
+  `discovery: listening for backend beacons on UDP 8001`. That's the
+  daemon's ability to re-find your laptop if its IP ever changes. If it
+  says it could not listen, everything else still works -- you'd just
+  have to re-run `Start_Dashboard.bat` by hand after an IP change. To
+  check the beacons actually arrive, stop the daemon and run
+  `/mnt/us/koreader/luajit /mnt/us/kindle-daemon/tools/discovery_probe.lua`.
 
 Leave it running for a few minutes. Try:
 - Turning your laptop's WiFi off and back on, or restarting the backend

@@ -29,7 +29,7 @@ from typing import List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from . import anthropic_usage, claude_session_usage, config, telegram_bot
+from . import anthropic_usage, claude_session_usage, config, discovery, telegram_bot
 from .state import StateStore
 from .ws_manager import ConnectionManager
 
@@ -66,6 +66,12 @@ async def lifespan(app: FastAPI):
         "ENABLED" if config.HAS_CLAUDE_SESSION else "DISABLED (no session key/org id set)",
     )
 
+    logger.info(
+        "Discovery beacon: %s",
+        "ENABLED" if config.DISCOVERY_ENABLED else "DISABLED (DISCOVERY_ENABLED=0)",
+    )
+
+    _background_tasks.append(asyncio.create_task(discovery.beacon_loop(), name="discovery-beacon"))
     _background_tasks.append(asyncio.create_task(telegram_bot.poll_loop(state), name="telegram-poll"))
     _background_tasks.append(asyncio.create_task(anthropic_usage.poll_loop(state), name="anthropic-poll"))
     _background_tasks.append(asyncio.create_task(claude_session_usage.poll_loop(state), name="claude-session-poll"))

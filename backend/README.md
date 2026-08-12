@@ -44,6 +44,8 @@ This document is the contract for whoever builds the Kindle-side daemon -- read 
    | `ANTHROPIC_ADMIN_KEY`  | Optional  | Must start with `sk-ant-admin`. If absent/placeholder, org-level Claude usage tracking is disabled and everything else still runs. |
    | `CLAUDE_SESSION_KEY`   | Optional  | Your claude.ai `sessionKey` browser cookie. If absent/placeholder, the session-usage (5-hour rate limit) card is disabled and everything else still runs. Treat like a password -- see `claude_session_usage.py`. |
    | `CLAUDE_ORG_ID`        | Optional  | Your claude.ai organization ID, needed alongside `CLAUDE_SESSION_KEY`. |
+   | `DISCOVERY_ENABLED`    | Optional  | Defaults to on. Broadcasts this machine's LAN address every 5s so the Kindle can re-find it after a DHCP change (see `discovery.py`). Set to `0` to disable -- the beacons are unauthenticated LAN broadcasts, so it is a deliberate choice. |
+   | `DISCOVERY_PORT`       | Optional  | Defaults to `8001`. Must match `discovery_port` in the Kindle's `src/config.lua`, and it is the port `kindle-daemon/bin/run.sh` opens in the Kindle's firewall. |
 
    `backend/.env` is git-ignored (both by the repo root `.gitignore` and
    `backend/.gitignore`) -- never commit real secrets.

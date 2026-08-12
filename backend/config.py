@@ -54,6 +54,27 @@ HAS_CLAUDE_SESSION = (
 # ======= State persistence =======
 STATE_FILE = BASE_DIR / "data" / "state.json"
 
+# ======= Discovery beacon =======
+# The backend announces its own address on the LAN over UDP so the Kindle
+# can find it again after this laptop's IP changes -- see discovery.py.
+#
+# Enabled by default. The alternative is what used to happen: the daemon
+# learns the laptop's address once at startup, and a DHCP lease change
+# mid-session leaves it talking to an address that no longer exists, with
+# no way back except restarting the dashboard by hand.
+#
+# Set DISCOVERY_ENABLED=0 in .env to turn it off. Worth knowing before you
+# decide: the beacon is an unauthenticated UDP broadcast, so anything on
+# your LAN can see it, and equally anything on your LAN could send a
+# lookalike telling the Kindle to connect somewhere else. That is the same
+# trust model the rest of this project already has (the WebSocket has no
+# authentication either), but it is now one packet easier to abuse, so the
+# choice is yours to make deliberately. The daemon does refuse beacons
+# advertising anything outside the private address ranges.
+DISCOVERY_ENABLED = os.getenv("DISCOVERY_ENABLED", "1") not in ("0", "false", "False", "no")
+DISCOVERY_PORT = int(os.getenv("DISCOVERY_PORT", "8001"))
+DISCOVERY_INTERVAL_SECONDS = 5
+
 # ======= Polling cadence =======
 TELEGRAM_POLL_INTERVAL_SECONDS = 2
 TELEGRAM_LONG_POLL_TIMEOUT = 5  # Telegram long-poll "timeout" query param

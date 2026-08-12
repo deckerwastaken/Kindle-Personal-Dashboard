@@ -38,7 +38,7 @@ docs/          -- setup guide, jailbreak reference, and secrets policy.
 
 ## Tests
 
-There are six suites. All of them run on your laptop with no Kindle, no
+There are eight suites. All of them run on your laptop with no Kindle, no
 network, and nothing to install beyond what the backend already needs:
 
 ```
@@ -46,8 +46,10 @@ cd kindle-daemon/tests && luajit test_gestures.lua        # tap/swipe classifica
 cd kindle-daemon/tests && luajit test_keys.lua            # power button / screen lock
 cd kindle-daemon/tests && luajit test_layout.lua          # every screen's layout
 cd kindle-daemon/tests && luajit test_hit_resolution.lua  # what a tap actually hits
-cd kindle-daemon/tests && luajit test_poll_pacing.lua     # how often the daemon wakes
+cd kindle-daemon/tests && luajit test_poll_pacing.lua     # wakeups + connection watchdog
+cd kindle-daemon/tests && luajit test_discovery.lua       # beacon parsing/validation
 python backend/tests/test_learnings.py                    # from the repo root
+python backend/tests/test_discovery.py                    # from the repo root
 ```
 
 `test_layout.lua` swaps a recorder in for the `fbink` CLI, renders each
@@ -65,10 +67,19 @@ immediately by this one.
 
 `test_poll_pacing.lua` is about battery rather than pixels. The daemon
 sleeps until its next piece of timed work instead of waking on a fixed
-tick (~60 wakeups an hour rather than 7200), which is only safe as long as
-every deadline actually moves forward when it fires — one that doesn't
+tick (~120 wakeups an hour rather than 7200), which is only safe as long
+as every deadline actually moves forward when it fires — one that doesn't
 turns the loop into a spin. This suite runs those timers against a
-simulated clock and counts.
+simulated clock and counts, and covers the watchdog that spots a
+connection which has died without being closed.
+
+The two `test_discovery` suites sit on either side of one wire format:
+Python builds the beacon, Lua parses it, and nothing but the format
+connects them — a drift produces no error anywhere, just a dashboard that
+quietly loses the ability to recover from an IP change. Each side pins the
+format, and the Lua one leans hardest on the *rejection* cases, since that
+parser decides where the daemon connects and any device on your network
+can send it a beacon.
 
 Together they cover the arithmetic. They deliberately cannot tell you
 whether anything *looks* right on real e-ink — ghosting, whether the

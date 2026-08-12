@@ -72,6 +72,28 @@ lipc-set-prop com.lab126.powerd preventScreenSaver 1 >>"$CRASH_LOG" 2>&1 || true
 # interface on a different device shouldn't block the daemon from starting.
 iw wlan0 set power_save off >>"$CRASH_LOG" 2>&1 || true
 
+# Let the backend's discovery beacons reach us (see src/discovery.lua).
+#
+# CONFIRMED ON HARDWARE (2026-08-12), and it is NOT optional: this
+# device's iptables INPUT chain has policy DROP, and the rule that looks
+# like a blanket "ACCEPT all" in `iptables -L INPUT -n` is actually scoped
+# to the usb0 interface -- you only see that with `-v`, which is what made
+# the first reading of it wrong. Inbound UDP on wlan0 is otherwise
+# accepted only for ESTABLISHED flows and a handful of stock ports.
+# Verified in both directions: with this rule, every beacon arrives; with
+# it removed, the chain's own drop counter rises by exactly the number
+# sent and nothing is delivered.
+#
+# Check-then-add (-C then -A), the same idiom as the SSH restart command
+# in config.example.lua, so repeated dashboard starts within one boot
+# don't stack up duplicate rules. iptables rules are not persistent, so
+# this has to run every start, exactly like the power_save line above.
+DISCOVERY_PORT="$(awk -F'[ =,]+' '/^[^-]*discovery_port/ {print $3; exit}' "$DAEMON_DIR/config.lua" 2>/dev/null)"
+[ -n "$DISCOVERY_PORT" ] || DISCOVERY_PORT=8001
+iptables -C INPUT -i wlan0 -p udp --dport "$DISCOVERY_PORT" -j ACCEPT 2>/dev/null \
+    || iptables -A INPUT -i wlan0 -p udp --dport "$DISCOVERY_PORT" -j ACCEPT \
+       >>"$CRASH_LOG" 2>&1 || true
+
 if [ ! -x "$LUAJIT_BIN" ]; then
     echo "run.sh: $LUAJIT_BIN not found or not executable." >>"$CRASH_LOG"
     echo "Is KOReader installed at $KOREADER_DIR ? Edit KOREADER_DIR in this" >>"$CRASH_LOG"

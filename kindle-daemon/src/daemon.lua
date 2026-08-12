@@ -40,6 +40,7 @@ end
 
 local posix = require("posix")
 local websocket = require("websocket")
+local discovery = require("discovery")
 local touch = require("touch")
 local keys = require("keys")
 local json = require("json")
@@ -126,6 +127,36 @@ if power_key_path then
         log.warn("keys: " .. tostring(kerr) .. " -- screen lock disabled")
     end
 end
+
+-- ===================== backend discovery =====================
+--
+-- Listens for the backend's UDP beacons so the daemon can re-find the
+-- laptop after its IP changes. See src/discovery.lua for the protocol and
+-- the security note, and backend/discovery.py for the sending side.
+--
+-- Opening this is best-effort: if the socket can't be opened (port taken,
+-- firewall, an older device), the daemon behaves exactly as it did before
+-- discovery existed. Nothing downstream is allowed to depend on it.
+local discovery_reader = nil
+if config.discovery_enabled == false then
+    log.info("discovery: disabled in config.lua")
+else
+    local dr, derr = discovery.open(config.discovery_port or 8001, log)
+    if dr then
+        discovery_reader = dr
+    else
+        log.warn("discovery: could not listen (" .. tostring(derr) ..
+            ") -- the dashboard works normally, but it will not be able to " ..
+            "find the laptop again by itself if the laptop's IP changes")
+    end
+end
+
+-- Rejected beacons are logged at most this often. Without a throttle a
+-- misconfigured or foreign broadcaster on the LAN would write a warning
+-- every few seconds forever, and this log is the main diagnostic tool
+-- this project has.
+local DISCOVERY_WARN_INTERVAL_MS = 60 * 1000
+local last_discovery_warn_ms = 0
 
 -- ===================== websocket connection management =====================
 
@@ -1075,6 +1106,9 @@ while true do
         if conn then
             poll_entries[#poll_entries + 1] = { fd = conn.fd, want_write = conn:wants_write() }
         end
+        if discovery_reader then
+            poll_entries[#poll_entries + 1] = { fd = discovery_reader.fd }
+        end
 
         local poll_timeout = compute_poll_timeout()
 
@@ -1160,6 +1194,82 @@ while true do
                             last_input_ms = now_ms()
                             set_screen_locked(not screen_locked, "power button")
                         end
+                    end
+                end
+            end
+        end
+
+        -- --- backend discovery beacons ---
+        -- Runs BEFORE the websocket block below, so an address learned
+        -- this pass is already in place for the reconnect attempt that
+        -- follows it, rather than waiting a whole extra iteration.
+        if discovery_reader then
+            local r = results[discovery_reader.fd]
+            if r and r.readable then
+                local ip, port, reject = discovery_reader:read()
+                if ip then
+                    -- THE RULE THAT MAKES THIS SAFE: a beacon is only
+                    -- acted on when we are NOT connected.
+                    --
+                    -- A working connection is proof that the address in
+                    -- use is right, and a beacon cannot improve on that.
+                    -- It CAN make things worse: this laptop has both wifi
+                    -- and ethernet on different subnets, and if Windows
+                    -- ever moved its default route to the ethernet side,
+                    -- the beacon would truthfully announce an address the
+                    -- Kindle has no route to. Adopting it would tear down
+                    -- a perfectly good connection in favour of one that
+                    -- cannot work.
+                    --
+                    -- Deferring until we're offline costs nothing, because
+                    -- the case this feature exists for -- the laptop's IP
+                    -- changing underneath us -- always breaks the
+                    -- connection first. The watchdog notices within 90s,
+                    -- we go offline, and the next beacon (within seconds)
+                    -- is adopted. It also self-heals a daemon started with
+                    -- a stale LAPTOP_IP: the first connect fails and the
+                    -- beacon corrects it without anyone intervening.
+                    local changed = (ip ~= config.laptop_ip) or
+                        (port ~= nil and port ~= config.laptop_port)
+                    if changed and conn_status ~= "open" then
+                        log.info(string.format(
+                            "discovery: backend announced %s:%d (was %s:%d) -- " ..
+                            "switching and reconnecting now",
+                            ip, port or config.laptop_port,
+                            tostring(config.laptop_ip), config.laptop_port))
+                        config.laptop_ip = ip
+                        if port then config.laptop_port = port end
+
+                        if conn then
+                            conn:close()
+                            conn = nil
+                        end
+                        conn_status = "offline"
+                        -- A new address deserves a clean slate: this is
+                        -- not the failing endpoint we were backing off
+                        -- from, so inheriting that backoff would make the
+                        -- daemon wait up to 30s before trying somewhere
+                        -- it has every reason to expect will work.
+                        reconnect_backoff_ms = config.reconnect_min_ms
+                        next_reconnect_at = 0
+                        try_connect()
+                        redraw_if_showing_state("backend address changed")
+                    elseif changed then
+                        -- Worth a line: it explains why a visibly correct
+                        -- beacon is being ignored, which would otherwise
+                        -- look like the feature not working.
+                        if (now_ms() - last_discovery_warn_ms) >= DISCOVERY_WARN_INTERVAL_MS then
+                            last_discovery_warn_ms = now_ms()
+                            log.info(string.format(
+                                "discovery: backend announced %s but the current " ..
+                                "connection to %s is healthy -- not switching",
+                                ip, tostring(config.laptop_ip)))
+                        end
+                    end
+                elseif reject then
+                    if (now_ms() - last_discovery_warn_ms) >= DISCOVERY_WARN_INTERVAL_MS then
+                        last_discovery_warn_ms = now_ms()
+                        log.warn("discovery: ignoring a beacon -- " .. tostring(reject))
                     end
                 end
             end
