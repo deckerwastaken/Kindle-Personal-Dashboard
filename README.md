@@ -1,5 +1,10 @@
 # Kindle Dashboard
 
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+![Backend: Python 3.11+](https://img.shields.io/badge/backend-Python%203.11%2B-3776AB)
+![Daemon: LuaJIT](https://img.shields.io/badge/kindle--daemon-LuaJIT-2C2D72)
+![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)
+
 A personal dashboard on a jailbroken Kindle e-reader: a Today screen with
 your task list and Claude usage, a Learning screen tracking your progress
 through courses and books, and a Telegram bot to feed both — rendered
@@ -7,18 +12,81 @@ directly to the e-ink screen and controlled by touch, swipe, and the
 power button (which locks the screen and idles the dashboard). No cloud,
 no third-party service — the backend runs on your own laptop.
 
-## Start here
+> ### ⚠️ Vibe-coded disclaimer
+> This entire project — architecture, backend, the native Kindle daemon,
+> the tests, and these docs — was built through conversational
+> pair-programming with **[Claude Code](https://claude.com/claude-code)**
+> (Anthropic's [Claude](https://www.anthropic.com/claude), Sonnet 5
+> model), directed and verified on real hardware by a single hobbyist with
+> no professional software background. "Vibe-coded" here means the
+> author described what they wanted and reviewed/tested the result, not
+> that the code is unverified: every feature listed below was deployed to
+> the physical Kindle and confirmed working, and the project carries eight
+> automated test suites (see [Tests](#tests)). Treat it as a solo, AI-assisted
+> hobby project, not audited or production-grade software — read before you
+> run it, especially anything touching your home network or your Kindle's
+> filesystem.
 
-Want to know what it actually does, in plain English? Read
-**`CHANGELOG.md`** — a no-jargon tour of every feature in version 2.
+## What it is, in one paragraph
 
-New to this repo? Read **`docs/LAUNCH_GUIDE.md`** — the single
-start-to-finish setup walkthrough. It links out to more detailed guides
-for each piece as needed.
+An old Kindle sits on a desk showing a dashboard instead of a book: the
+time, today's tasks, what you're learning, and how much of your Claude
+usage allowance you've used. You tap the screen to tick things off, and
+add new things from your phone over Telegram. Nothing leaves your home
+network — the "brain" is a small server you run on your own laptop, and
+the Kindle only ever talks to that.
 
-Already set up? Day-to-day use is two double-clickable scripts:
-`kindle-daemon/ops/Start_Dashboard.bat` and `Stop_Dashboard.bat` — see
-`kindle-daemon/ops/README.md`.
+Want the full plain-English feature tour? Read **[`CHANGELOG.md`](CHANGELOG.md)**.
+New to this repo and want to set it up? Read **[`docs/LAUNCH_GUIDE.md`](docs/LAUNCH_GUIDE.md)**.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    subgraph Phone["Your phone"]
+        TG["Telegram app"]
+    end
+
+    subgraph Laptop["Your laptop — backend/ (FastAPI)"]
+        BOT["Telegram bot poller"]
+        API["WebSocket + REST server\nmain.py"]
+        USAGE["Claude usage pollers\nAnthropic Admin API + claude.ai session"]
+        STATE[("state.json\n(atomic writes)")]
+    end
+
+    subgraph Kindle["Jailbroken Kindle — kindle-daemon/ (LuaJIT)"]
+        DAEMON["daemon.lua\nmain loop, event-paced"]
+        FBINK["FBInk CLI\ne-ink rendering"]
+        EVDEV["evdev\ntouch + power button"]
+    end
+
+    TG <-->|Bot API| BOT
+    BOT <--> API
+    API <--> STATE
+    USAGE -->|polls| ANTH["Anthropic API"]
+    USAGE --> STATE
+    API <==>|WebSocket, LAN only| DAEMON
+    DAEMON --> FBINK
+    EVDEV --> DAEMON
+```
+
+Everything above runs on your own hardware and your own home network. The
+only outbound call is the backend polling the Anthropic API for usage
+numbers (optional, off by default until you add a key).
+
+## Tech stack
+
+| Layer | Where | Language / tools | What it does |
+|---|---|---|---|
+| **Backend** | `backend/` (runs on your laptop) | Python 3.11+, [FastAPI](https://fastapi.tiangolo.com/) + [uvicorn](https://www.uvicorn.org/), [httpx](https://www.python-httpx.org/) | Serves the WebSocket the Kindle connects to, polls the Telegram Bot API, polls the Anthropic API for usage stats, persists state as JSON |
+| **Kindle daemon** | `kindle-daemon/` (runs on the Kindle) | [LuaJIT](https://luajit.org/) + FFI, no external Lua libraries | Renders the UI by shelling out to the `fbink` CLI already on the device; reads touch/power input via `evdev`; hand-written WebSocket client, JSON codec, SHA-1, and base64 (all in `src/`) since the device has no package manager |
+| **Lockscreen** (optional) | `lockscreen/` | Shell script + KOReader config | Replaces the stock Kindle screensaver image with custom text |
+| **Messaging** | Telegram | [Telegram Bot API](https://core.telegram.org/bots/api) (raw HTTP, no SDK) | Add/list/complete tasks and learning progress from your phone |
+| **Usage tracking** (optional) | Anthropic | [Anthropic Admin API](https://docs.anthropic.com/) + an unofficial claude.ai session endpoint | Powers the "Claude usage" card on the Today screen |
+| **Display hardware** | Kindle 7th Gen (KT2) confirmed | [FBInk](https://github.com/NiLuJe/FBInk) | Direct framebuffer drawing to e-ink, no X server dependency |
+
+No database, no cloud service, no build step — the backend is a single
+Python process and the daemon is a single Lua process.
 
 ## Layout
 
@@ -35,6 +103,10 @@ lockscreen/    -- optional: replaces the Kindle's stock screensaver with
                   custom text. See lockscreen/README.md.
 docs/          -- setup guide, jailbreak reference, and secrets policy.
 ```
+
+Already set up? Day-to-day use is two double-clickable scripts:
+`kindle-daemon/ops/Start_Dashboard.bat` and `Stop_Dashboard.bat` — see
+`kindle-daemon/ops/README.md`.
 
 ## Tests
 
@@ -103,6 +175,17 @@ before investing time on a different device.
 Real secrets (Telegram bot token, Anthropic API key, the Kindle's local
 config) never live in this repo — see `docs/SECRETS.md` for the policy
 this project follows.
+
+## Credits
+
+Built by [deckerwastaken](https://github.com/deckerwastaken) in
+conversational pair-programming sessions with
+**[Claude Code](https://claude.com/claude-code)** running
+**[Claude](https://www.anthropic.com/claude) Sonnet 5**, [Anthropic](https://www.anthropic.com)'s
+coding-agent CLI. See the disclaimer at the top of this README for what
+that means in practice. No other third-party services, SDKs, or paid
+tools were used — everything here talks directly to FBInk, evdev, the
+Telegram Bot API, and the Anthropic API over plain HTTP/WebSocket.
 
 ## License
 
