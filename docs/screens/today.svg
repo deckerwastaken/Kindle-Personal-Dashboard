@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" width="600" height="800">
+  <title>Kindle Dashboard mockup</title>
+  <rect x="-3" y="-3" width="606" height="806" fill="#1a1a1a"/>
+  <rect x="0" y="0" width="600" height="800" fill="white"/>
+  <text x="24" y="50.239999999999995" font-size="29.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">14:30</text>
+  <text x="24" y="77.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Monday, 17 August</text>
+  <rect x="536" y="30" width="36" height="20" fill="black"/>
+  <rect x="538" y="32" width="32" height="16" fill="white"/>
+  <rect x="572" y="36" width="4" height="8" fill="black"/>
+  <rect x="538" y="32" width="21" height="16" fill="black"/>
+  <text x="520" y="37.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">68%</text>
+  <text x="444" y="78.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">ONLINE</text>
+  <rect x="24" y="104" width="552" height="2" fill="black"/>
+  <text x="24" y="135.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">TODAY</text>
+  <rect x="24" y="162" width="40" height="40" fill="black"/>
+  <rect x="30" y="168" width="28" height="28" fill="white"/>
+  <text x="80" y="174.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Buy milk</text>
+  <text x="548" y="181.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">x</text>
+  <rect x="24" y="226" width="40" height="40" fill="black"/>
+  <rect x="30" y="232" width="28" height="28" fill="white"/>
+  <text x="80" y="238.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Reply to Alex</text>
+  <text x="548" y="245.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">x</text>
+  <rect x="24" y="290" width="40" height="40" fill="black"/>
+  <rect x="30" y="296" width="28" height="28" fill="white"/>
+  <text x="80" y="302.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Water the plants</text>
+  <text x="548" y="309.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">x</text>
+  <rect x="24" y="354" width="40" height="40" fill="black"/>
+  <text x="30" y="379.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">X</text>
+  <text x="80" y="366.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Read 20 pages  (done)</text>
+  <text x="548" y="373.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">x</text>
+  <rect x="24" y="410" width="56" height="56" fill="none"/>
+  <polygon points="42,426 42,450 32,438" fill="black"/>
+  <polygon points="538,426 538,450 558,438" fill="black"/>
+  <text x="244" y="443.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="middle" letter-spacing="0">1</text>
+  <line x1="230" y1="448" x2="258" y2="448" stroke="black" stroke-width="2"/>
+  <rect x="276" y="414" width="48" height="48" fill="black"/>
+  <text x="300" y="443.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">2</text>
+  <text x="356" y="443.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="middle" letter-spacing="0">3</text>
+  <line x1="342" y1="448" x2="370" y2="448" stroke="black" stroke-width="2"/>
+  <text x="24" y="505.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">+ Add Task</text>
+  <text x="24" y="575.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">CLAUDE USAGE</text>
+  <rect x="24" y="594" width="552" height="78" fill="#949494"/>
+  <text x="40" y="616.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Current session</text>
+  <text x="560" y="616.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="end" letter-spacing="0">6% used</text>
+  <rect x="39" y="625" width="522" height="16" fill="black"/>
+  <rect x="40" y="626" width="520" height="14" fill="white"/>
+  <rect x="40" y="626" width="31" height="14" fill="black"/>
+  <text x="40" y="660.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Resets in 4 hr 41 min</text>
+  <rect x="538" y="642" width="22" height="22" fill="black"/>
+  <path d="M 543,653 A 6 6 0 1 1 549,659" stroke="white" stroke-width="2" fill="none"/>
+  <polygon points="543,649 543,655 549,653" fill="white"/>
+  <rect x="24" y="680" width="272" height="48" fill="#949494"/>
+  <text x="32" y="706.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Exit Dashboard</text>
+  <rect x="304" y="680" width="272" height="48" fill="#949494"/>
+  <text x="312" y="706.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Restart SSH</text>
+  <rect x="0" y="736" width="600" height="64" fill="white"/>
+  <rect x="0" y="736" width="600" height="2" fill="black"/>
+  <rect x="0" y="738" width="150" height="62" fill="black"/>
+  <text x="20" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Today</text>
+  <text x="170" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Learning</text>
+  <text x="320" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="#949494" text-anchor="start" letter-spacing="0">Habits</text>
+  <text x="470" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="#949494" text-anchor="start" letter-spacing="0">Home</text>
+</svg>

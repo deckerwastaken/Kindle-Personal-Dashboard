@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" width="600" height="800">
+  <title>Kindle Dashboard mockup</title>
+  <rect x="-3" y="-3" width="606" height="806" fill="#1a1a1a"/>
+  <rect x="0" y="0" width="600" height="800" fill="white"/>
+  <text x="24" y="43.68" font-size="22.1" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">LEARNING</text>
+  <text x="24" y="77.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">1 course  2 books</text>
+  <rect x="536" y="30" width="36" height="20" fill="black"/>
+  <rect x="538" y="32" width="32" height="16" fill="white"/>
+  <rect x="572" y="36" width="4" height="8" fill="black"/>
+  <rect x="538" y="32" width="17" height="16" fill="black"/>
+  <text x="520" y="37.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">54%</text>
+  <rect x="24" y="104" width="552" height="2" fill="black"/>
+  <text x="576" y="143.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">40%</text>
+  <text x="24" y="143.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Spanish</text>
+  <rect x="23" y="154" width="554" height="14" fill="black"/>
+  <rect x="24" y="155" width="552" height="12" fill="white"/>
+  <rect x="24" y="155" width="220" height="12" fill="black"/>
+  <text x="576" y="207.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">38%</text>
+  <text x="512" y="204.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">120/320 pages</text>
+  <text x="24" y="207.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Atomic Habits</text>
+  <rect x="23" y="218" width="554" height="14" fill="black"/>
+  <rect x="24" y="219" width="552" height="12" fill="white"/>
+  <rect x="24" y="219" width="209" height="12" fill="black"/>
+  <text x="576" y="271.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">0%</text>
+  <text x="528" y="268.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">0/412 pages</text>
+  <text x="24" y="271.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Dune</text>
+  <rect x="23" y="282" width="554" height="14" fill="black"/>
+  <rect x="24" y="283" width="552" height="12" fill="white"/>
+  <rect x="0" y="736" width="600" height="64" fill="white"/>
+  <rect x="0" y="736" width="600" height="2" fill="black"/>
+  <text x="20" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Today</text>
+  <rect x="150" y="738" width="150" height="62" fill="black"/>
+  <text x="170" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Learning</text>
+  <text x="320" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="#949494" text-anchor="start" letter-spacing="0">Habits</text>
+  <text x="470" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="#949494" text-anchor="start" letter-spacing="0">Home</text>
+</svg>

@@ -88,6 +88,41 @@ numbers (optional, off by default until you add a key).
 No database, no cloud service, no build step — the backend is a single
 Python process and the daemon is a single Lua process.
 
+## Screens
+
+There's no simulator and no rendered image path for this device — the
+daemon draws straight to the e-ink framebuffer via `fbink`, so these
+aren't photos, they're mockups built pixel-for-pixel from the real
+layout constants in `kindle-daemon/src/ui.lua` (600x800, the actual
+panel resolution). Colour is flat black/white/gray on purpose: that's
+what the hardware is.
+
+**Today** — clock, battery, connection status, the task list (checked
+tasks sink to the bottom instead of disappearing), pagination, the
+Claude usage card, and the two recovery buttons:
+
+![Today screen](docs/screens/today.svg)
+
+**Learning** — courses and books, each with a derived or manual
+progress bar. Read-only on-device; all edits happen from Telegram:
+
+![Learning screen](docs/screens/learning.svg)
+
+**Locked** — the power button blanks the screen to this rather than
+going fully dark, so a locked dashboard is never mistaken for a crashed
+one:
+
+![Lock screen](docs/screens/lock.svg)
+
+### Interactions
+
+E-ink doesn't animate — there's no motion to show, no GIF that would be
+honest about how this hardware behaves. It snaps between static frames
+on refresh. So instead of a video, here's what each gesture actually
+does to the screen, as a before/after:
+
+![Interaction walkthroughs: tap to complete a task, add a task, refresh the usage card, swipe pagination, and the power-button lock](docs/screens/interactions.svg)
+
 ## Layout
 
 ```

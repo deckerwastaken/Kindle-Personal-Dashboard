@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" width="600" height="800">
+  <title>Kindle Dashboard mockup</title>
+  <rect x="-3" y="-3" width="606" height="806" fill="#1a1a1a"/>
+  <rect x="0" y="0" width="600" height="800" fill="white"/>
+  <text x="300.0" y="407.68" font-size="22.1" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="middle" letter-spacing="0">Locked</text>
+</svg>
