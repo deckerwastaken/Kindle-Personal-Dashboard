@@ -11,6 +11,12 @@ its own careful, up-to-date guide rather than a copy pasted in here that could g
 current, actively-maintained community hub for Kindle jailbreaking, covering every
 supported device and firmware version, not just the one below.
 
+> **Disclaimer**: this page documents and links to a third-party jailbreak process —
+> it doesn't host, distribute, or endorse any jailbreak tool, and jailbreaking your
+> own device is your decision and your risk. It can void your warranty, and the legal
+> status of device jailbreaking varies by jurisdiction, so check what applies where you
+> are before proceeding.
+
 ## What this specific project was built and tested against
 
 So you can sanity-check whether your own device is a close match before you start:

@@ -50,6 +50,12 @@ This document is the contract for whoever builds the Kindle-side daemon -- read 
    `backend/.env` is git-ignored (both by the repo root `.gitignore` and
    `backend/.gitignore`) -- never commit real secrets.
 
+   > **Unofficial endpoint, may break without notice.** The session-usage card uses
+   > an undocumented claude.ai web-app endpoint, not a published Anthropic API -- see
+   > `claude_session_usage.py`'s module docstring. Anthropic can change or remove it
+   > at any time with no warning; this feature is entirely optional and everything
+   > else in the dashboard works fine without it.
+
    **Getting `CLAUDE_SESSION_KEY` and `CLAUDE_ORG_ID` (optional, advanced -- skip
    this if you don't want the session-usage card; everything else works fine
    without it):**
