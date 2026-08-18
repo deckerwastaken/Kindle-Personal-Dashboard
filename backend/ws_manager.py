@@ -30,6 +30,13 @@ class ConnectionManager:
                 self._connections.remove(websocket)
         logger.info("Client disconnected (%d total)", len(self._connections))
 
+    def connection_count(self) -> int:
+        """Not lock-protected -- len() on a list is atomic in CPython and this
+        is only ever used for a best-effort "is anything connected" check
+        (see telegram_bot.py's /lock command), not for correctness-critical
+        logic."""
+        return len(self._connections)
+
     async def broadcast(self, data: dict) -> None:
         message = json.dumps(data)
         async with self._lock:

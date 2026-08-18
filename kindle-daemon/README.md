@@ -250,6 +250,51 @@ this is ever worth pushing further, would be real suspend-to-RAM —
 `powerd` is still running and, confirmed on hardware, ignores the button
 entirely, so that avenue is open.
 
+### PIN entry and remote lock
+
+Two additions on top of the plain lock above, both opt-in:
+
+- **A 4-digit PIN**, set with Telegram's `/setpin` (there's no on-device
+  way to set it — same reason the Learning screen is read-only: the
+  Add Task keyboard has no digits). Once `lock_pin` is non-empty, the
+  power button no longer unlocks instantly from the blank **Locked**
+  screen — it shows a small numeric keypad instead (`ui.lua`'s
+  `M.draw_pin_entry`), and only the correct 4 digits actually unlock.
+  Pressing power again while the keypad is up cancels back to the plain
+  blank screen rather than being misread as an unlock attempt.
+
+  The PIN is checked **entirely on the Kindle**, not round-tripped to
+  the backend on every attempt — the device has to stay unlockable
+  during a WiFi/backend outage, same reasoning as leaving the WebSocket
+  connected through a lock. That means `lock_pin` travels to the Kindle
+  in the ordinary state broadcast, in plain text, like every other field
+  in this project's WebSocket protocol (see backend/README.md's
+  "no authentication on these endpoints" note) — it is a deterrent
+  against a casual glance at the device, not a security boundary against
+  anyone with access to your home network. Wrong attempts just clear the
+  entry and let you retry; there's no lockout, by design (this is a
+  device only you physically hold).
+
+  `pin_entry_active` in `daemon.lua` is a flag orthogonal to both
+  `screen_locked` and `ui_mode` — the identical "overlay, don't add a
+  mode" treatment `screen_locked` itself gets, and for the same reason:
+  it lets a cancelled PIN entry return to exactly the blank screen it
+  interrupted without having to remember and restore anything.
+  `screen_locked` stays `true` for the entire time the keypad is up, so
+  the clock/battery/idle-lock timers stay suspended exactly as they are
+  for the plain locked screen.
+
+- **`/lock` from Telegram.** Sends `{"type": "command", "command":
+  "lock"}` over the same WebSocket the state pushes use — a distinct
+  message shape (see backend/README.md's "Backend -> Kindle (commands)"
+  section), checked before the state-snapshot branch so it can never be
+  confused with one. `daemon.lua` calls the exact same
+  `set_screen_locked(true, ...)` the power button and idle auto-lock
+  already use, so a remote lock is indistinguishable from a local one —
+  same PIN required to get back in, if one is set. There is
+  deliberately no matching `unlock` command: remote locking can only
+  make an unattended device safer, never less so.
+
 ### Finding the laptop again (discovery)
 
 The daemon is told the laptop's address once, at startup. When a DHCP

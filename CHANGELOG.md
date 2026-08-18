@@ -1,10 +1,14 @@
-# What's in version 2
+# What's in version 2.1
 
 This page is written for someone who has never written a line of code.
 No jargon, or where a technical word is unavoidable, it gets explained.
 
-Version 1 was an early experiment. Version 2 is a complete rebuild, and
+Version 1 was an early experiment. Version 2 was a complete rebuild, and
 it's the one that actually lives on the Kindle and gets used every day.
+**Version 2.1 adds one thing to the screen lock below: an optional PIN,
+and the ability to lock the screen from your phone** — see "The PIN, and
+locking from your phone" further down. Everything else on this page
+describes what version 2 already did.
 
 ---
 
@@ -105,6 +109,8 @@ send appears on the Kindle within a second, without touching the Kindle.
 | `/percent L1 40` | Sets that course to 40% |
 | `/page L1 120` | Records that you're on page 120 |
 | `/total L1 400` | Corrects a book's page count |
+| `/setpin 1234` | Sets (or changes) the screen-lock PIN — `/setpin off` removes it |
+| `/lock` | Locks the Kindle's screen right now |
 | `/help` | Lists all of the above |
 
 Tasks are plain numbers (`3`); courses and books get an **L** in front
@@ -132,6 +138,28 @@ setting (`auto_lock_idle_ms` — the setup guide shows you where).
 While it's locked, the Kindle stops doing almost everything: no clock
 updates, no battery checks, no screen refreshes, and taps are ignored so a
 dashboard in a bag doesn't tick off your tasks by accident.
+
+### The PIN, and locking from your phone (new in 2.1)
+
+Two small additions on top of the lock above, both optional:
+
+- **A 4-digit PIN.** Send the bot `/setpin 1234` (any 4 digits you like)
+  and pressing the power button to unlock no longer brings the dashboard
+  straight back — it shows a small number pad on the screen first, and
+  only the right 4 digits actually unlock it. Get it wrong and it just
+  clears and lets you try again, no penalty. Send `/setpin off` any time
+  to remove it and go back to instant unlocking.
+
+  The number pad exists because the dashboard's regular on-screen
+  keyboard (used for adding tasks) only has letters, no digits — the same
+  reason learning progress is only editable from Telegram. The PIN is
+  checked entirely on the Kindle itself, so it still works even if your
+  laptop or WiFi happens to be down at the time.
+
+- **`/lock` from Telegram.** Send it and the Kindle locks right now,
+  wherever you are — same lock, same PIN if you've set one, as pressing
+  the power button yourself. Handy if you walked away and want to be sure
+  it's not sitting unlocked.
 
 **On power use generally.** E-ink screens are unusual: keeping an image on
 screen costs nothing at all. The battery goes on *changing* the screen and

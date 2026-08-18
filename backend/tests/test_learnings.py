@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend import telegram_bot  # noqa: E402
 from backend.state import StateStore  # noqa: E402
+from backend.ws_manager import ConnectionManager  # noqa: E402
 
 # ---------------------------------------------------------------- harness
 
@@ -86,10 +87,13 @@ async def _fake_send(client, text):
 telegram_bot.send_message = _fake_send
 
 
+_fake_manager = ConnectionManager()  # zero connections; only /lock's test cares
+
+
 async def say(state, text):
     """Run one command and return the reply it produced."""
     _replies.clear()
-    await telegram_bot.process_command(state, None, text)
+    await telegram_bot.process_command(state, None, text, _fake_manager)
     return _replies[-1] if _replies else ""
 
 
@@ -352,9 +356,9 @@ async def test_bare_commands_answer():
     # Ordinary chat and unknown commands must stay silent, so the bot
     # never talks over a normal conversation.
     _replies.clear()
-    await telegram_bot.process_command(s, None, "just some text")
+    await telegram_bot.process_command(s, None, "just some text", _fake_manager)
     check("plain text is ignored", len(_replies), 0)
-    await telegram_bot.process_command(s, None, "/nonsense")
+    await telegram_bot.process_command(s, None, "/nonsense", _fake_manager)
     check("unknown command is ignored", len(_replies), 0)
 
 
@@ -407,6 +411,56 @@ async def test_persistence_roundtrip():
     p.unlink(missing_ok=True)
 
 
+async def test_lock_pin():
+    print("\n=== /setpin and /lock ===")
+    s = new_store()
+    check("no PIN by default", s.snapshot()["lock_pin"], "")
+
+    reply = await say(s, "/setpin 12")
+    check_contains("too-short PIN rejected", reply, "Usage: /setpin")
+    check("rejected PIN doesn't get stored", s.snapshot()["lock_pin"], "")
+
+    reply = await say(s, "/setpin abcd")
+    check_contains("non-digit PIN rejected", reply, "Usage: /setpin")
+
+    reply = await say(s, "/setpin 12345")
+    check_contains("too-long PIN rejected", reply, "Usage: /setpin")
+
+    reply = await say(s, "/setpin 1234")
+    check_contains("valid PIN accepted", reply, "PIN set")
+    check("PIN stored on state", s.snapshot()["lock_pin"], "1234")
+
+    reply = await say(s, "/setpin off")
+    check_contains("off removes the PIN", reply, "PIN removed")
+    check("lock_pin cleared", s.snapshot()["lock_pin"], "")
+
+    # /lock with nobody connected: honest about doing nothing, and must
+    # not raise just because there's no Kindle to send to.
+    reply = await say(s, "/lock")
+    check_contains("no Kindle connected", reply, "No Kindle is currently connected")
+
+    # Simulate a connected Kindle (bypassing the real accept() handshake,
+    # which needs a live ASGI WebSocket) to exercise the "actually sends"
+    # path -- a dummy object with an async send_text is all broadcast()
+    # needs.
+    class _FakeSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, msg):
+            self.sent.append(msg)
+
+    fake_ws = _FakeSocket()
+    _fake_manager._connections.append(fake_ws)
+    try:
+        reply = await say(s, "/lock")
+        check_contains("lock command sent", reply, "Locked the dashboard")
+        check("exactly one command frame sent", len(fake_ws.sent), 1)
+        check_contains("command frame names the lock command", fake_ws.sent[0], '"command": "lock"')
+    finally:
+        _fake_manager._connections.remove(fake_ws)
+
+
 async def main():
     for t in (
         test_course_basics,
@@ -421,6 +475,7 @@ async def main():
         test_bare_commands_answer,
         test_list_output,
         test_persistence_roundtrip,
+        test_lock_pin,
     ):
         await t()
 

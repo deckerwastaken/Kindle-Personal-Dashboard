@@ -106,6 +106,8 @@ for _, case in ipairs({
     { "dashboard, 0 tasks", ui.draw_dashboard, { make_state(0), "open", 1, nil, 80 } },
     { "learning, 3 items", ui.draw_learning, { learning_state(3), "open", 1, 80 } },
     { "learning, 40 items (pager shown)", ui.draw_learning, { learning_state(40), "open", 3, 80 } },
+    { "pin entry, empty buffer", ui.draw_pin_entry, { "", false } },
+    { "pin entry, wrong-PIN error shown", ui.draw_pin_entry, { "", true } },
 }) do
     local zones = case[2](unpack(case[3]))
     local wrong = {}

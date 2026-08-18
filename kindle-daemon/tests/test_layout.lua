@@ -663,6 +663,77 @@ do
     end
 end
 
+print("\n=== PIN entry keypad ===")
+do
+    local ops, zones = render(ui.draw_pin_entry, "", false)
+    check_in_bounds("pin entry, empty buffer", ops)
+    check_zones_sane("pin entry, empty buffer", zones)
+    check_no_overlap("pin entry, empty buffer", zones)
+
+    -- Exactly 11 tap targets: digits 0-9 plus backspace. The row-4 blank
+    -- spacer (see PIN_KEYPAD_ROWS in ui.lua) must register no zone at all.
+    check_eq("11 hit zones (10 digits + backspace)", #zones, 11)
+
+    local digits_seen = {}
+    local backspace_count = 0
+    for _, z in ipairs(zones) do
+        if z.kind == "pin_digit" then
+            digits_seen[z.digit] = (digits_seen[z.digit] or 0) + 1
+        elseif z.kind == "pin_backspace" then
+            backspace_count = backspace_count + 1
+        else
+            fail("unexpected zone kind on the PIN screen: %s", tostring(z.kind))
+        end
+    end
+    local all_digits_once = true
+    for d = 0, 9 do
+        if digits_seen[tostring(d)] ~= 1 then all_digits_once = false end
+    end
+    check("every digit 0-9 appears exactly once", all_digits_once)
+    check_eq("exactly one backspace key", backspace_count, 1)
+
+    -- Never leaks which digits were typed: no digit character may appear
+    -- as drawn TEXT anywhere except as a key's own label (10 key labels
+    -- total: "0".."9" -- a stray extra digit glyph would mean something
+    -- is echoing the buffer in plain text). Expected count is 9, not 10:
+    -- this test file's own decode() (see its header comment) drops any
+    -- token that is literally "0", since that string ALSO appears as the
+    -- value of the unrelated "-x 0"/"-y 0" flags every draw_text call
+    -- emits -- so the "0" key's own label is invisible to this specific
+    -- check by construction, not because it isn't drawn. The hit-zone
+    -- checks above (which read draw_pin_entry's real return value, not
+    -- this decoded text) already prove the "0" key exists and works.
+    local digit_glyphs = 0
+    for _, o in ipairs(ops) do
+        if o.op == "text" and o.text and #o.text == 1 and o.text:match("^%d$") then
+            digit_glyphs = digit_glyphs + 1
+        end
+    end
+    check_eq("only the 9 non-'0' key labels are single-digit text draws", digit_glyphs, 9)
+end
+do
+    -- A wrong-attempt redraw: empty buffer (daemon.lua clears it before
+    -- this call) but the error line now showing.
+    local ops, zones = render(ui.draw_pin_entry, "", true)
+    check_in_bounds("pin entry, wrong-PIN error shown", ops)
+    check_no_overlap("pin entry, wrong-PIN error shown", zones)
+    local found_error_text = false
+    for _, o in ipairs(ops) do
+        if o.op == "text" and o.text and o.text:find("Wrong PIN") then found_error_text = true end
+    end
+    check("error state draws the 'Wrong PIN' message", found_error_text)
+end
+do
+    -- Partial entry (2 of 4 digits) must still render in-bounds -- this
+    -- is the buffer state M.update_pin_dots() partial-refreshes between
+    -- full redraws, so draw_pin_entry itself only needs to be sane at
+    -- every buffer length, not exercise the partial-refresh path.
+    for _, buf in ipairs({ "1", "12", "123", "1234" }) do
+        local ops = render(ui.draw_pin_entry, buf, false)
+        check_in_bounds("pin entry, buffer length " .. #buf, ops)
+    end
+end
+
 print("\n=== other screens still render cleanly ===")
 do
     local ops, zones = render(ui.draw_keyboard, "hello world")

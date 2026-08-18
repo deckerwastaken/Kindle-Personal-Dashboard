@@ -152,6 +152,7 @@ it last received; there is no incremental diffing.
     "resets_label": "Resets in 4 hr 41 min",
     "last_updated": "2026-08-04T10:39:12.001482+00:00"
   },
+  "lock_pin": "1234",
   "last_updated": "2026-07-30T14:32:10.482201+00:00"
 }
 ```
@@ -202,9 +203,43 @@ Field notes:
   ISO-8601 timestamps. `""` if unavailable.
 - `session_usage.last_updated`: ISO-8601 UTC timestamp of the last successful session-
   usage fetch, or `""` if it has never succeeded.
+- `lock_pin`: `""` if no PIN is configured (the power button unlocks instantly, same
+  as before this feature existed), otherwise a 4-digit string. Set via Telegram's
+  `/setpin` (see `telegram_bot.py`) -- there is no on-device way to set it, since the
+  Kindle's on-screen keyboard has no digits. **Sent to the Kindle in plain text**,
+  same as every other field here: this backend has no authentication or transport
+  encryption on any WebSocket traffic (see the note above), so this is not a new
+  trust boundary. The PIN is verified entirely on the Kindle itself (see
+  `kindle-daemon/src/daemon.lua`'s pin-entry handling), not round-tripped back to
+  this backend on every unlock attempt, so the device stays unlockable even if the
+  backend/WiFi is down.
 - top-level `last_updated`: ISO-8601 UTC timestamp of the last state mutation of any
   kind (bump this is what changed, not `claude_usage.last_updated`, if you need "is
   this fresh" logic for the whole payload).
+
+### Backend -> Kindle (commands)
+
+A second, much smaller message shape the backend can push, distinct from the
+full-state snapshot above -- an imperative action rather than a "here is the
+current data" replace. Currently there is exactly one:
+
+```json
+{"type": "command", "command": "lock"}
+```
+
+Sent when the Telegram `/lock` command runs (see `telegram_bot.py`'s `_cmd_lock`).
+The Kindle daemon locks its screen exactly as if the power button had been pressed
+-- see `kindle-daemon/src/daemon.lua`'s `set_screen_locked()`, the single function
+both paths go through. There is no `unlock` command: remote locking only makes the
+device safer to have left unattended, never less so, so unlocking always requires
+physical presence at the Kindle (the power button, plus the PIN if one is set).
+
+The `"type": "command"` field is what tells this apart from a state snapshot, which
+never has a `type` key at all (see `StateStore.snapshot()`) -- the Kindle checks
+`decoded.type == "command"` before falling through to "this must be a state push".
+A Kindle daemon running code from before this feature existed would NOT recognize
+it and would instead treat it as a (malformed) state snapshot -- so both sides of
+this protocol should be updated together, same as any other shape change here.
 
 ### Kindle -> Backend (actions)
 

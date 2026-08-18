@@ -34,6 +34,7 @@ DEFAULT_STATE = {
     "learnings": [],
     "claude_usage": {"tokens_today": 0, "last_updated": ""},
     "session_usage": {"percent": 0, "resets_at": "", "resets_label": "", "last_updated": ""},
+    "lock_pin": "",
     "last_updated": "",
 }
 
@@ -82,6 +83,8 @@ class StateStore:
                     "session_usage",
                     {"percent": 0, "resets_at": "", "resets_label": "", "last_updated": ""},
                 )
+                # Existing state.json files predate the PIN lock feature too.
+                data.setdefault("lock_pin", "")
                 data.setdefault("last_updated", "")
                 logger.info(
                     "Loaded existing state from %s (%d tasks, %d learnings)",
@@ -454,5 +457,26 @@ class StateStore:
                 "resets_label": resets_label,
                 "last_updated": _utcnow_iso(),
             }
+            await self._commit_locked()
+        await self._broadcast()
+
+    # ---------- screen-lock PIN ----------
+    #
+    # Verified entirely on the Kindle itself (see kindle-daemon/src/daemon.lua),
+    # not round-tripped to this backend on every unlock attempt -- the device
+    # must still be unlockable during a WiFi/backend outage, same reasoning as
+    # why the WebSocket is left connected but never required for the lock
+    # itself to function. That means the PIN has to live in the state blob
+    # broadcast to the Kindle like everything else here, in plain text: this
+    # project has no authentication or transport encryption on ANY of its
+    # WebSocket traffic (see backend/README.md's "no authentication on these
+    # endpoints" note), so a 4-digit PIN sitting in that same broadcast is not
+    # a new trust boundary, just an existing one applied to one more field.
+    # `""` means "no PIN configured" -- the Kindle's power button unlocks
+    # instantly in that case, exactly like before this feature existed.
+
+    async def set_lock_pin(self, pin: str) -> None:
+        async with self._lock:
+            self._data["lock_pin"] = pin
             await self._commit_locked()
         await self._broadcast()

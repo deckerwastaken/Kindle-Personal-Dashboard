@@ -9,8 +9,10 @@ A personal dashboard on a jailbroken Kindle e-reader: a Today screen with
 your task list and Claude usage, a Learning screen tracking your progress
 through courses and books, and a Telegram bot to feed both — rendered
 directly to the e-ink screen and controlled by touch, swipe, and the
-power button (which locks the screen and idles the dashboard). No cloud,
-no third-party service — the backend runs on your own laptop.
+power button (which locks the screen and idles the dashboard, optionally
+behind a 4-digit PIN entered on a numeric keypad). Telegram can also lock
+the screen remotely. No cloud, no third-party service — the backend runs
+on your own laptop.
 
 > ### ⚠️ Vibe-coded disclaimer
 > This entire project — architecture, backend, the native Kindle daemon,
@@ -81,7 +83,7 @@ numbers (optional, off by default until you add a key).
 | **Backend** | `backend/` (runs on your laptop) | Python 3.11+, [FastAPI](https://fastapi.tiangolo.com/) + [uvicorn](https://www.uvicorn.org/), [httpx](https://www.python-httpx.org/) | Serves the WebSocket the Kindle connects to, polls the Telegram Bot API, polls the Anthropic API for usage stats, persists state as JSON |
 | **Kindle daemon** | `kindle-daemon/` (runs on the Kindle) | [LuaJIT](https://luajit.org/) + FFI, no external Lua libraries | Renders the UI by shelling out to the `fbink` CLI already on the device; reads touch/power input via `evdev`; hand-written WebSocket client, JSON codec, SHA-1, and base64 (all in `src/`) since the device has no package manager |
 | **Lockscreen** (optional) | `lockscreen/` | Shell script + KOReader config | Replaces the stock Kindle screensaver image with custom text |
-| **Messaging** | Telegram | [Telegram Bot API](https://core.telegram.org/bots/api) (raw HTTP, no SDK) | Add/list/complete tasks and learning progress from your phone |
+| **Messaging** | Telegram | [Telegram Bot API](https://core.telegram.org/bots/api) (raw HTTP, no SDK) | Add/list/complete tasks and learning progress, set the lock PIN, and lock the screen remotely from your phone |
 | **Usage tracking** (optional) | Anthropic | [Anthropic Admin API](https://docs.anthropic.com/) + an unofficial claude.ai session endpoint | Powers the "Claude usage" card on the Today screen |
 | **Display hardware** | Kindle 7th Gen (KT2) confirmed | [FBInk](https://github.com/NiLuJe/FBInk) | Direct framebuffer drawing to e-ink, no X server dependency |
 
@@ -110,9 +112,15 @@ progress bar. Read-only on-device; all edits happen from Telegram:
 
 **Locked** — the power button blanks the screen to this rather than
 going fully dark, so a locked dashboard is never mistaken for a crashed
-one:
+one. Telegram's `/lock` can trigger the same screen remotely:
 
 ![Lock screen](docs/screens/lock.svg)
+
+**PIN entry** (optional) — set a 4-digit PIN with Telegram's `/setpin`,
+and the power button shows a numeric keypad instead of unlocking
+instantly. Checked entirely on the Kindle itself, so unlocking still
+works with the backend offline; wrong attempts just clear and let you
+retry, no lockout. `/setpin off` removes it.
 
 ### Interactions
 
@@ -210,6 +218,12 @@ before investing time on a different device.
 Real secrets (Telegram bot token, Anthropic API key, the Kindle's local
 config) never live in this repo — see `docs/SECRETS.md` for the policy
 this project follows.
+
+The optional lock-screen PIN is checked entirely on the Kindle and never
+sent anywhere except this LAN's own unauthenticated WebSocket traffic —
+see `backend/README.md`'s `lock_pin` field note. It stops a casual glance
+at a device you left lying around, not a determined attacker with access
+to your home network.
 
 ## Credits
 

@@ -16,6 +16,10 @@ Commands:
       /page <id> <page>      - set what page you're on in a book
       /total <id> <pages>    - correct a book's total page count
       /done, /delete         - also accept a learning id (L3)
+    Lock
+      /setpin <4 digits>      - set (or change) the screen-lock PIN
+      /setpin off             - remove the PIN
+      /lock                   - lock the Kindle's screen right now
     Both
       /list                  - show tasks and learning
       /help, /start          - show help text
@@ -27,6 +31,15 @@ Kindle's on-screen keyboard (see kindle-daemon/src/ui.lua) is
 lowercase-letters-plus-space only -- it has no digits at all. So the
 device is deliberately read-only for learnings: it displays them, and
 this bot is the only way to change them.
+
+The lock-screen PIN (/setpin) is set here for the identical reason -- it
+is a 4-digit number and the on-screen keyboard has no digits. UNLIKE
+learnings, though, the PIN also needs to be *entered* on the device (to
+unlock it), so kindle-daemon/src/ui.lua adds one small purpose-built
+numeric keypad just for that -- see M.draw_pin_entry there. That keypad
+is not a general-purpose input method; it exists solely because a task
+name or a page count can wait for Telegram, but "unlock the screen you
+are physically holding" cannot depend on your phone being nearby.
 
 PARSING CONVENTIONS
 -------------------
@@ -64,6 +77,7 @@ import httpx
 
 from . import config
 from .state import MAX_BOOK_PAGES, StateStore
+from .ws_manager import ConnectionManager
 
 logger = logging.getLogger("kindle_dashboard.telegram")
 
@@ -86,6 +100,12 @@ HELP_TEXT = (
     "   e.g. /page L1 120\n"
     "/total <id> <pages> - fix a page count\n"
     "   e.g. /total L1 300\n"
+    "\n"
+    "LOCK\n"
+    "/setpin <4 digits> - set/change the lock PIN\n"
+    "   e.g. /setpin 1234\n"
+    "/setpin off - remove the PIN\n"
+    "/lock - lock the Kindle's screen now\n"
     "\n"
     "BOTH\n"
     "/list - show everything\n"
@@ -112,6 +132,8 @@ BOT_COMMANDS = [
     {"command": "percent", "description": "Set course progress: /percent L1 40"},
     {"command": "page", "description": "Set book page: /page L1 120"},
     {"command": "total", "description": "Fix a book's page count"},
+    {"command": "setpin", "description": "Set/remove the screen-lock PIN: /setpin 1234"},
+    {"command": "lock", "description": "Lock the Kindle's screen now"},
     {"command": "help", "description": "Show all commands"},
 ]
 
@@ -529,6 +551,39 @@ async def _cmd_delete(state: StateStore, client: httpx.AsyncClient, rest: str) -
         await send_message(client, f"No task #{item_id} or learning L{item_id} found.")
 
 
+async def _cmd_setpin(state: StateStore, client: httpx.AsyncClient, rest: str) -> None:
+    pin = rest.strip()
+    if pin.lower() in ("off", "none", "clear", "remove"):
+        await state.set_lock_pin("")
+        await send_message(client, "PIN removed -- the power button unlocks instantly again.")
+        return
+    if not (len(pin) == 4 and pin.isdigit()):
+        await send_message(
+            client,
+            "Usage: /setpin <4 digits>\ne.g. /setpin 1234\nOr /setpin off to remove it.",
+        )
+        return
+    await state.set_lock_pin(pin)
+    await send_message(
+        client, "PIN set. The Kindle will ask for it after the screen locks."
+    )
+
+
+async def _cmd_lock(client: httpx.AsyncClient, manager: ConnectionManager) -> None:
+    # Fire-and-forget over the WebSocket -- there is no queue, so this only
+    # does anything if the Kindle is connected RIGHT NOW. Checking the count
+    # first means the reply is honest about whether anything actually
+    # happened, rather than always claiming success like a normal state
+    # mutation would (a state broadcast is safe to claim -- the next
+    # reconnect delivers it anyway; a lock command sent to nobody is simply
+    # lost).
+    if manager.connection_count() == 0:
+        await send_message(client, "No Kindle is currently connected -- nothing to lock.")
+        return
+    await manager.broadcast({"type": "command", "command": "lock"})
+    await send_message(client, "Locked the dashboard.")
+
+
 async def _cmd_list(state: StateStore, client: httpx.AsyncClient) -> None:
     """Shows BOTH lists. /list means 'show me my stuff', not 'show me the
     tasks collection' -- and a separate /learnlist would be one more name
@@ -561,7 +616,9 @@ async def _cmd_list(state: StateStore, client: httpx.AsyncClient) -> None:
     await send_message(client, "\n".join(lines))
 
 
-async def process_command(state: StateStore, client: httpx.AsyncClient, text: str) -> None:
+async def process_command(
+    state: StateStore, client: httpx.AsyncClient, text: str, manager: ConnectionManager
+) -> None:
     cmd, rest = _split_command(text.strip())
 
     if cmd == "/add":
@@ -595,6 +652,12 @@ async def process_command(state: StateStore, client: httpx.AsyncClient, text: st
     elif cmd == "/total":
         await _cmd_total(state, client, rest)
 
+    elif cmd == "/setpin":
+        await _cmd_setpin(state, client, rest)
+
+    elif cmd == "/lock":
+        await _cmd_lock(client, manager)
+
     elif cmd in ("/help", "/start"):
         await send_message(client, HELP_TEXT)
 
@@ -604,7 +667,7 @@ async def process_command(state: StateStore, client: httpx.AsyncClient, text: st
     # always answers with usage; see _split_command's comment.
 
 
-async def poll_loop(state: StateStore) -> None:
+async def poll_loop(state: StateStore, manager: ConnectionManager) -> None:
     """Long-running background task. Never raises -- any error during a
     single iteration is logged and the loop continues, so a bad/missing
     token just means every poll fails and gets logged, rather than
@@ -637,7 +700,7 @@ async def poll_loop(state: StateStore) -> None:
                         continue  # ignore anyone who isn't the authorized chat
                     text = message.get("text", "")
                     if text:
-                        await process_command(state, client, text)
+                        await process_command(state, client, text, manager)
             except asyncio.CancelledError:
                 raise
             except Exception as e:

@@ -61,10 +61,17 @@ safely, so a reboot is the one path that's actually been proven to work.)
   dashboard locks itself after 15 minutes of nobody touching it, to save
   battery; the power button locks and unlocks it on demand too. Press the
   power button once and the dashboard comes straight back on whatever tab
-  it was on. (An entirely *blank* screen with no word on it is a different
-  thing and does mean something went wrong — check
+  it was on — unless you've set a PIN (see below), in which case a small
+  keypad appears first. (An entirely *blank* screen with no word on it is a
+  different thing and does mean something went wrong — check
   `/mnt/us/kindle-daemon/daemon.log`.) To turn the automatic lock off, set
   `auto_lock_idle_ms = 0` in the Kindle's `src/config.lua`.
+- **Optional PIN, and locking from your phone.** Message the Telegram bot
+  `/setpin 1234` (any 4 digits) and the power button will ask for those
+  digits on a small on-screen keypad before it unlocks — `/setpin off`
+  removes it again. `/lock` locks the screen right now from Telegram,
+  wherever you are, using the same lock (and the same PIN, if you've set
+  one) as the power button.
 
 ## Resolved issue: starting the dashboard used to reboot the Kindle
 

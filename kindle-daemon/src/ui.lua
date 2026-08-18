@@ -1831,6 +1831,150 @@ function M.draw_confirm_exit()
     return hit_zones
 end
 
+-- ===================== PIN entry (screen lock) =====================
+--
+-- Shown instead of an immediate unlock when a lock_pin is configured (see
+-- backend/README.md's "Backend -> Kindle (state pushes)" section) -- a
+-- purpose-built numeric keypad, because the Add Task keyboard above is
+-- deliberately letters-and-space only (see its own header comment) and
+-- has no digits to reuse. daemon.lua owns entering/leaving this screen
+-- (a `pin_entry_active` flag, orthogonal to both `ui_mode` and
+-- `screen_locked`, the same "state that overlays everything else rather
+-- than becoming a new ui_mode" treatment the lock itself already gets --
+-- see daemon.lua's `screen_locked` doc comment for why); this file only
+-- draws whatever buffer/error state it's told about.
+--
+-- Deliberately NO on-screen cancel button: the power button already
+-- means "go back" everywhere else in the lock flow (locked -> pressing
+-- it either unlocks or, with a PIN configured, enters this screen), so
+-- pressing it again here to bail back out to the blank Locked screen
+-- reuses a control the user has already found, rather than adding a
+-- second, screen-specific way to do the same thing.
+
+L.pin_title_y = L.margin
+L.pin_dot_w = 28
+L.pin_dot_gap = 20
+L.pin_dot_count = 4
+L.pin_dots_y = L.pin_title_y + 24 + L.gap_lg -- 24 = real size-3 title height
+L.pin_error_y = L.pin_dots_y + L.pin_dot_w + L.gap_sm
+L.pin_error_h = 16 -- real size-2 text height; reserved whether or not an
+                    -- error is currently showing, so the keypad below
+                    -- never shifts position depending on error state
+L.pin_keypad_top_y = L.pin_error_y + L.pin_error_h + L.gap_lg
+
+-- 3 columns exactly fill the usable width with no leftover pixels
+-- (173*3 + 16*2 = 552 = 600 - 2*24), which is what fixes col_w and
+-- col_gap here rather than leaving them independently tunable.
+L.pin_col_w = 173
+L.pin_col_gap = 16
+L.pin_row_h = 96
+L.pin_row_gap = 16
+L.pin_col_pitch = L.pin_col_w + L.pin_col_gap
+L.pin_row_pitch = L.pin_row_h + L.pin_row_gap
+
+-- Total dot-row width, used to center it: pin_dot_count dots plus
+-- (pin_dot_count - 1) gaps between them.
+local PIN_DOTS_TOTAL_W = L.pin_dot_count * L.pin_dot_w + (L.pin_dot_count - 1) * L.pin_dot_gap
+L.pin_dots_x = math.floor((L.screen_w - PIN_DOTS_TOTAL_W) / 2)
+
+-- "" is a blank spacer (no key, no hit zone) -- keeps 0 in its
+-- conventional bottom-center phone-keypad position instead of sliding it
+-- next to 7/8/9.
+local PIN_KEYPAD_ROWS = {
+    { "1", "2", "3" },
+    { "4", "5", "6" },
+    { "7", "8", "9" },
+    { "", "0", "DEL" },
+}
+
+--- Redraws just the dot row (how many of the 4 PIN digits have been
+--- entered so far -- never the digits themselves, so a glance from
+--- across the room reveals nothing about the PIN). Filled black =
+--- entered, hollow = not yet -- the same opposite-treatment-means-
+--- opposite-state convention as the task checkbox.
+local function draw_pin_dots(buffer)
+    M.fill_rect(0, L.pin_dots_y, L.screen_w, L.pin_dot_w, "WHITE")
+    local entered = #buffer
+    for i = 0, L.pin_dot_count - 1 do
+        local dx = L.pin_dots_x + i * (L.pin_dot_w + L.pin_dot_gap)
+        M.fill_rect(dx, L.pin_dots_y, L.pin_dot_w, L.pin_dot_w, "BLACK")
+        if i >= entered then
+            local inset = 5
+            M.fill_rect(dx + inset, L.pin_dots_y + inset,
+                L.pin_dot_w - 2 * inset, L.pin_dot_w - 2 * inset, "WHITE")
+        end
+    end
+end
+
+-- Same de-ghosting treatment as the Add Task preview strip (see
+-- M.update_keyboard_preview's comment for the hardware-confirmed reason
+-- DU is used per-keystroke with a periodic full GC16 settle) -- a
+-- separate counter from the keyboard's own, since the two screens are
+-- never active at the same time but shouldn't share unrelated state.
+local PIN_DEGHOST_INTERVAL = 8
+local _pin_dot_update_count = 0
+
+--- Fast partial-refresh update of ONLY the dot row, for per-digit
+--- feedback while a PIN is still being entered (fewer than 4 digits so
+--- far -- the 4th digit always triggers a full M.draw_pin_entry redraw
+--- instead, from daemon.lua, since that's the moment right/wrong is
+--- decided and the error line may need to change). Does not return
+--- hit_zones: the keypad's positions never move while typing.
+function M.update_pin_dots(buffer)
+    draw_pin_dots(buffer)
+    _pin_dot_update_count = _pin_dot_update_count + 1
+    local waveform = "DU"
+    if _pin_dot_update_count % PIN_DEGHOST_INTERVAL == 0 then
+        waveform = "GC16"
+    end
+    M.flush(waveform, { x = 0, y = L.pin_dots_y, w = L.screen_w, h = L.pin_dot_w })
+end
+
+--- Full redraw of the PIN entry keypad. `buffer` is the PIN digits typed
+--- so far (usually "" -- daemon.lua clears it before every full redraw
+--- here, whether entering fresh or after a wrong attempt) and `show_error`
+--- draws "Wrong PIN" above the keypad when true. Returns hit_zones:
+--- {kind="pin_digit", digit="0".."9"}, {kind="pin_backspace"}.
+function M.draw_pin_entry(buffer, show_error)
+    local hit_zones = {}
+    M.fill_rect(0, 0, L.screen_w, L.screen_h, "WHITE")
+    _pin_dot_update_count = 0 -- see M.update_pin_dots's comment: this
+                               -- full-quality draw is a clean baseline
+
+    M.draw_text(L.margin, L.pin_title_y, "Enter PIN", { size = 3 })
+    draw_pin_dots(buffer)
+
+    M.fill_rect(0, L.pin_error_y, L.screen_w, L.pin_error_h, "WHITE")
+    if show_error then
+        local label = "Wrong PIN -- try again"
+        M.draw_text(math.floor((L.screen_w - text_w(label, 2)) / 2), L.pin_error_y,
+            label, { size = 2 })
+    end
+
+    for row_i, row in ipairs(PIN_KEYPAD_ROWS) do
+        local row_y = L.pin_keypad_top_y + (row_i - 1) * L.pin_row_pitch
+        for col_i, label in ipairs(row) do
+            if label ~= "" then
+                local col_x = L.margin + (col_i - 1) * L.pin_col_pitch
+                local is_del = (label == "DEL")
+                M.fill_rect(col_x, row_y, L.pin_col_w, L.pin_row_h, "GRAY6")
+                local size = is_del and 2 or 3
+                local tx = col_x + math.floor((L.pin_col_w - text_w(label, size)) / 2)
+                local ty = row_y + math.floor((L.pin_row_h - 8 * size) / 2)
+                M.draw_text(tx, ty, label, { size = size, fg = "WHITE", bg = "GRAY6" })
+                hit_zones[#hit_zones + 1] = {
+                    kind = is_del and "pin_backspace" or "pin_digit",
+                    digit = (not is_del) and label or nil,
+                    x = col_x, y = row_y, w = L.pin_col_w, h = L.pin_row_h,
+                }
+            end
+        end
+    end
+
+    M.flush("GC16")
+    return hit_zones
+end
+
 --- Draws the locked screen (power button or the idle auto-lock, both in
 --- daemon.lua): a blank WHITE page with a single centered "Locked".
 ---

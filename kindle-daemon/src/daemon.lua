@@ -260,6 +260,22 @@ local FLASH_DURATION_MS = 3000
 -- they're referenced and there is no hoisting.
 local screen_locked = false
 
+-- PIN entry (optional, on top of screen_locked): when current_state.lock_pin
+-- is non-empty, the power button no longer unlocks instantly -- it swaps the
+-- blank "Locked" screen for a numeric keypad (see ui.lua's
+-- M.draw_pin_entry) instead. This is orthogonal to BOTH screen_locked and
+-- ui_mode, the same "flag that overlays everything else" treatment
+-- screen_locked itself gets and for the identical reason: modelling it as a
+-- ui_mode would mean remembering and restoring whatever ui_mode was current
+-- before entering it, which pin_entry_active gets for free by simply not
+-- touching ui_mode at all. screen_locked stays TRUE for the whole time PIN
+-- entry is showing -- unlocking only happens once the correct 4 digits are
+-- entered (see handle_pin_entry_tap below), which is what keeps the clock/
+-- battery/idle-lock work suspended (see compute_poll_timeout) while the
+-- keypad is up, exactly as it is for the plain blank "Locked" screen.
+local pin_entry_active = false
+local pin_buffer = ""
+
 -- When the last real user input (tap, swipe, power button) happened.
 -- Backend state pushes deliberately do NOT count: the dashboard updating
 -- itself in the corner of the room is not somebody using it, and if it
@@ -574,6 +590,38 @@ local function set_screen_locked(locked, reason)
     end
 end
 
+--- Draws the PIN keypad (or re-draws it after a wrong attempt) and wires
+--- up current_hit_zones -- the single place this file calls
+--- ui.draw_pin_entry, so the draw call and the hit-zone bookkeeping can
+--- never drift apart. `show_error` is passed straight through to ui.lua;
+--- see M.draw_pin_entry's own doc comment for what it draws.
+local function show_pin_entry(show_error)
+    local ok, hz = pcall(ui.draw_pin_entry, pin_buffer, show_error)
+    if ok then
+        current_hit_zones = hz
+    else
+        log.error("pin entry: draw failed (" .. tostring(hz) .. ")")
+    end
+end
+
+--- Leaves PIN entry and returns to the plain blank "Locked" screen --
+--- used both when the power button cancels an in-progress entry and when
+--- a remote Telegram lock arrives while the keypad happens to be up (see
+--- the websocket "command" handling below). screen_locked is untouched:
+--- it was already true the entire time PIN entry was showing (see
+--- pin_entry_active's own doc comment above), so there is nothing to
+--- flip here, only the keypad to erase.
+local function cancel_pin_entry(reason)
+    log.info("pin entry cancelled (" .. reason .. ")")
+    pin_entry_active = false
+    pin_buffer = ""
+    current_hit_zones = {}
+    local ok, err = pcall(ui.draw_blank_screen)
+    if not ok then
+        log.error("pin entry: re-blanking the screen failed: " .. tostring(err))
+    end
+end
+
 local function zone_contains(z, x, y)
     return x >= z.x and x < z.x + z.w and y >= z.y and y < z.y + z.h
 end
@@ -881,6 +929,53 @@ local function handle_confirm_exit_tap(zone)
     end
 end
 
+--- Handles a tap while the PIN keypad is up. Separate from handle_tap
+--- below (not dispatched through ui_mode) because pin_entry_active is
+--- orthogonal to ui_mode -- see its own doc comment above.
+local function handle_pin_entry_tap(x, y)
+    local zone = hit_test(x, y)
+    if not zone then return end
+
+    if zone.kind == "pin_backspace" then
+        if #pin_buffer > 0 then
+            pin_buffer = pin_buffer:sub(1, -2)
+            ui.update_pin_dots(pin_buffer) -- fast partial refresh, not a full redraw()
+        end
+        return
+    end
+
+    if zone.kind ~= "pin_digit" then return end
+    if #pin_buffer >= 4 then return end -- can't happen via the UI (the
+        -- 4th digit below always resolves to unlock-or-wrong before a
+        -- 5th tap could land), kept as a guard rather than an assumption
+
+    pin_buffer = pin_buffer .. zone.digit
+
+    if #pin_buffer < 4 then
+        ui.update_pin_dots(pin_buffer) -- fast partial refresh
+        return
+    end
+
+    -- 4th digit just landed: this is the moment of truth. current_state
+    -- may be nil (never connected yet) or lock_pin may have been cleared
+    -- server-side since this keypad was drawn -- either way there is
+    -- nothing valid to match against, which is treated as "wrong", not
+    -- as an automatic unlock. A PIN prompt that unlocks for ANY input
+    -- the moment the expected value is unknown would be worse than
+    -- useless.
+    local expected = current_state and current_state.lock_pin
+    if expected and expected ~= "" and pin_buffer == expected then
+        log.info("pin entry: correct PIN")
+        pin_entry_active = false
+        pin_buffer = ""
+        set_screen_locked(false, "correct PIN")
+    else
+        log.info("pin entry: wrong PIN")
+        pin_buffer = ""
+        show_pin_entry(true)
+    end
+end
+
 local function handle_tap(x, y)
     log.info(string.format("tap at (%d, %d)", x, y))
     local zone = hit_test(x, y)
@@ -963,11 +1058,16 @@ end
 --- Single entry point for everything touch.lua produces. Kept separate
 --- from handle_tap above so the tap path stays exactly as it was.
 local function handle_gesture(gesture)
-    -- A locked screen ignores touch outright -- taps, swipes, the lot.
-    -- Only the power button can bring it back. This is deliberate: if a
-    -- tap unlocked it, the dashboard would wake every time it shifted in
-    -- a bag, which defeats the whole feature.
-    if screen_locked then
+    -- A locked screen ignores touch outright -- taps, swipes, the lot --
+    -- with exactly one carve-out: the PIN keypad IS touch input, and it
+    -- only ever shows up while screen_locked is still true (see
+    -- pin_entry_active's doc comment). Without this carve-out the keypad
+    -- would be drawn but untappable, which is worse than not offering it
+    -- at all. Otherwise: only the power button can bring the screen back.
+    -- This is deliberate -- if a bare tap unlocked it, the dashboard
+    -- would wake every time it shifted in a bag, which defeats the whole
+    -- feature.
+    if screen_locked and not pin_entry_active then
         log.info("ignoring " .. tostring(gesture.kind) .. " -- screen is locked")
         return
     end
@@ -976,6 +1076,16 @@ local function handle_gesture(gesture)
     -- inert "drag" below: a drag is a finger on the glass, so it means
     -- somebody is here, even though nothing on screen acts on it.
     last_input_ms = now_ms()
+
+    if pin_entry_active then
+        -- Only taps mean anything on the keypad -- no paged content to
+        -- swipe, no drag gesture with a use here. Silently inert, same
+        -- treatment as a drag on the keyboard/exit-confirm screens below.
+        if gesture.kind == "tap" then
+            handle_pin_entry_tap(gesture.x, gesture.y)
+        end
+        return
+    end
 
     if gesture.kind == "tap" then
         handle_tap(gesture.x, gesture.y)
@@ -1192,7 +1302,32 @@ while true do
                             -- this covers the lock side, which returns
                             -- early without redrawing.)
                             last_input_ms = now_ms()
-                            set_screen_locked(not screen_locked, "power button")
+
+                            -- Three distinct presses, not two: the plain
+                            -- lock/unlock toggle below only applies when
+                            -- pin_entry_active is false. While the keypad
+                            -- is up, pressing power again means "never
+                            -- mind" -- back to the plain blank Locked
+                            -- screen -- rather than being reinterpreted as
+                            -- an unlock (screen_locked is still true
+                            -- throughout PIN entry, see its doc comment,
+                            -- so `not screen_locked` alone can't tell
+                            -- these two presses apart).
+                            if pin_entry_active then
+                                cancel_pin_entry("power button")
+                            elseif screen_locked then
+                                local pin = current_state and current_state.lock_pin
+                                if pin and pin ~= "" then
+                                    log.info("screen unlock requested (power button) -- PIN required")
+                                    pin_entry_active = true
+                                    pin_buffer = ""
+                                    show_pin_entry(false)
+                                else
+                                    set_screen_locked(false, "power button")
+                                end
+                            else
+                                set_screen_locked(true, "power button")
+                            end
                         end
                     end
                 end
@@ -1295,7 +1430,32 @@ while true do
                     log.info("ws: connected")
                 elseif ev.type == "text" then
                     local decode_ok, decoded = pcall(json.decode, ev.data)
-                    if decode_ok and type(decoded) == "table" and decoded.error then
+                    if decode_ok and type(decoded) == "table" and decoded.type == "command" then
+                        -- An imperative push, not a state snapshot -- see
+                        -- backend/README.md's "Backend -> Kindle
+                        -- (commands)" section. Checked BEFORE the
+                        -- .error/state branches below: state.snapshot()
+                        -- never sets a "type" key at all, so this can
+                        -- never collide with a real state push.
+                        if decoded.command == "lock" then
+                            log.info("ws: remote lock command received (Telegram)")
+                            -- If the keypad happened to be up, drop it
+                            -- back to the plain blank screen first --
+                            -- set_screen_locked(true, ...) below is a
+                            -- no-op when screen_locked is ALREADY true
+                            -- (which it is throughout PIN entry, see
+                            -- pin_entry_active's doc comment), so without
+                            -- this the keypad would otherwise stay on
+                            -- screen through a remote lock instead of
+                            -- being replaced by it.
+                            if pin_entry_active then
+                                cancel_pin_entry("remote lock arrived mid-entry")
+                            end
+                            set_screen_locked(true, "telegram")
+                        else
+                            log.warn("ws: unrecognized command: " .. tostring(decoded.command))
+                        end
+                    elseif decode_ok and type(decoded) == "table" and decoded.error then
                         -- backend/main.py replies to a rejected action
                         -- (bad_request/not_found/internal_error) on this
                         -- SAME connection, with no "type" field to tell it

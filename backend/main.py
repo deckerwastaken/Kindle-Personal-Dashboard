@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
     )
 
     _background_tasks.append(asyncio.create_task(discovery.beacon_loop(), name="discovery-beacon"))
-    _background_tasks.append(asyncio.create_task(telegram_bot.poll_loop(state), name="telegram-poll"))
+    _background_tasks.append(asyncio.create_task(telegram_bot.poll_loop(state, manager), name="telegram-poll"))
     _background_tasks.append(asyncio.create_task(anthropic_usage.poll_loop(state), name="anthropic-poll"))
     _background_tasks.append(asyncio.create_task(claude_session_usage.poll_loop(state), name="claude-session-poll"))
 
