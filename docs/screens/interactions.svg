@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 1180" width="680" height="1180">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 1412" width="680" height="1412">
   <title>Kindle Dashboard mockup</title>
-  <rect x="0" y="0" width="680" height="1180" fill="white"/>
+  <rect x="0" y="0" width="680" height="1412" fill="white"/>
   <text x="40" y="34" font-size="16" font-family="DejaVu Sans Mono, Consolas, monospace" fill="black" text-anchor="start">Tap a task's checkbox</text>
   <rect x="40" y="68" width="250" height="150" fill="none" stroke="black" stroke-width="2"/>
   <text x="40" y="58" font-size="13" font-family="DejaVu Sans Mono, Consolas, monospace" fill="#333" text-anchor="start">before</text>
@@ -147,4 +147,42 @@
   <text x="335.0" y="1061.0" font-size="13" font-family="DejaVu Sans Mono, Consolas, monospace" fill="#333" text-anchor="middle">power</text>
   <text x="515.0" y="1081.432" font-size="16.2" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="middle" letter-spacing="0">Locked</text>
   <text x="40" y="1166" font-size="12" font-family="DejaVu Sans Mono, Consolas, monospace" fill="#555" text-anchor="start">Press again -&gt; exact previous tab, no restart. CPU use drops ~175x while locked.</text>
+  <text x="40" y="1194" font-size="16" font-family="DejaVu Sans Mono, Consolas, monospace" fill="black" text-anchor="start">Press power again, with a PIN set</text>
+  <rect x="40" y="1228" width="250" height="150" fill="none" stroke="black" stroke-width="2"/>
+  <text x="40" y="1218" font-size="13" font-family="DejaVu Sans Mono, Consolas, monospace" fill="#333" text-anchor="start">before: locked</text>
+  <rect x="390" y="1228" width="250" height="150" fill="none" stroke="black" stroke-width="2"/>
+  <text x="390" y="1218" font-size="13" font-family="DejaVu Sans Mono, Consolas, monospace" fill="#333" text-anchor="start">after: keypad</text>
+  <text x="165" y="1313.432" font-size="16.2" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="middle" letter-spacing="0">Locked</text>
+  <circle cx="254" cy="1254" r="14" fill="none" stroke="black" stroke-width="2.5"/>
+  <line x1="254" y1="1240" x2="254" y2="1250" stroke="black" stroke-width="2.5"/>
+  <line x1="300" y1="1303.0" x2="356" y2="1303.0" stroke="black" stroke-width="2"/>
+  <polygon points="370,1303.0 356,1297.0 356,1309.0" fill="black"/>
+  <text x="335.0" y="1293.0" font-size="13" font-family="DejaVu Sans Mono, Consolas, monospace" fill="#333" text-anchor="middle">power</text>
+  <rect x="483" y="1242" width="10" height="10" fill="black"/>
+  <rect x="497" y="1242" width="10" height="10" fill="black"/>
+  <rect x="511" y="1242" width="10" height="10" fill="none" stroke="black" stroke-width="1"/>
+  <rect x="525" y="1242" width="10" height="10" fill="none" stroke="black" stroke-width="1"/>
+  <rect x="413" y="1264" width="64" height="18" fill="#949494"/>
+  <text x="445" y="1277.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">1</text>
+  <rect x="483" y="1264" width="64" height="18" fill="#949494"/>
+  <text x="515" y="1277.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">2</text>
+  <rect x="553" y="1264" width="64" height="18" fill="#949494"/>
+  <text x="585" y="1277.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">3</text>
+  <rect x="413" y="1286" width="64" height="18" fill="#949494"/>
+  <text x="445" y="1299.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">4</text>
+  <rect x="483" y="1286" width="64" height="18" fill="#949494"/>
+  <text x="515" y="1299.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">5</text>
+  <rect x="553" y="1286" width="64" height="18" fill="#949494"/>
+  <text x="585" y="1299.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">6</text>
+  <rect x="413" y="1308" width="64" height="18" fill="#949494"/>
+  <text x="445" y="1321.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">7</text>
+  <rect x="483" y="1308" width="64" height="18" fill="#949494"/>
+  <text x="515" y="1321.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">8</text>
+  <rect x="553" y="1308" width="64" height="18" fill="#949494"/>
+  <text x="585" y="1321.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">9</text>
+  <rect x="483" y="1330" width="64" height="18" fill="#949494"/>
+  <text x="515" y="1343.2" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">0</text>
+  <rect x="553" y="1330" width="64" height="18" fill="#949494"/>
+  <text x="585" y="1343.2" font-size="6.5" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="middle" letter-spacing="0">DEL</text>
+  <text x="40" y="1398" font-size="12" font-family="DejaVu Sans Mono, Consolas, monospace" fill="#555" text-anchor="start">Only shown if you've set a PIN with /setpin. Wrong digits just clear and let you retry.</text>
 </svg>

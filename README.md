@@ -117,10 +117,12 @@ one. Telegram's `/lock` can trigger the same screen remotely:
 ![Lock screen](docs/screens/lock.svg)
 
 **PIN entry** (optional) — set a 4-digit PIN with Telegram's `/setpin`,
-and the power button shows a numeric keypad instead of unlocking
+and the power button shows this numeric keypad instead of unlocking
 instantly. Checked entirely on the Kindle itself, so unlocking still
 works with the backend offline; wrong attempts just clear and let you
-retry, no lockout. `/setpin off` removes it.
+retry, no lockout. `/setpin off` removes it:
+
+![PIN entry screen](docs/screens/pin-entry.svg)
 
 ### Interactions
 
@@ -129,7 +131,7 @@ honest about how this hardware behaves. It snaps between static frames
 on refresh. So instead of a video, here's what each gesture actually
 does to the screen, as a before/after:
 
-![Interaction walkthroughs: tap to complete a task, add a task, refresh the usage card, swipe pagination, and the power-button lock](docs/screens/interactions.svg)
+![Interaction walkthroughs: tap to complete a task, add a task, refresh the usage card, swipe pagination, the power-button lock, and the PIN keypad](docs/screens/interactions.svg)
 
 ## Layout
 
