@@ -1,17 +1,17 @@
 # Jailbreak reference (what this project was built and tested against)
 
-This project needs a **jailbroken** Kindle — "jailbroken" means the device's normal
+This project needs a **jailbroken** Kindle - "jailbroken" means the device's normal
 software restrictions have been removed, so it can run programs Amazon didn't put
 there itself (like KOReader and this dashboard). Jailbreaking is **not part of this
-project** — it's a well-documented, actively-maintained process owned by the Kindle
+project** - it's a well-documented, actively-maintained process owned by the Kindle
 modding community, and doing it wrong can leave your device unusable, so it deserves
 its own careful, up-to-date guide rather than a copy pasted in here that could go stale.
 
-**Start here for jailbreaking**: [kindlemodding.org](https://kindlemodding.org) — the
+**Start here for jailbreaking**: [kindlemodding.org](https://kindlemodding.org) - the
 current, actively-maintained community hub for Kindle jailbreaking, covering every
 supported device and firmware version, not just the one below.
 
-> **Disclaimer**: this page documents and links to a third-party jailbreak process —
+> **Disclaimer**: this page documents and links to a third-party jailbreak process -
 > it doesn't host, distribute, or endorse any jailbreak tool, and jailbreaking your
 > own device is your decision and your risk. It can void your warranty, and the legal
 > status of device jailbreaking varies by jurisdiction, so check what applies where you
@@ -28,7 +28,7 @@ So you can sanity-check whether your own device is a close match before you star
 
 If your Kindle is a different model or firmware version, the dashboard itself may
 still work once jailbroken (it doesn't depend on this specific hardware in any deep
-way), but the exact jailbreak method below won't necessarily apply — check
+way), but the exact jailbreak method below won't necessarily apply - check
 kindlemodding.org's own compatibility chart for your device first.
 
 ## The method that worked for this device: WinterBreak2
@@ -50,21 +50,21 @@ worked on firmware below 5.16.4, required no Amazon account registration, and no
    device has a chance to phone home to Amazon).
 
 If this exact tool is no longer current by the time you're reading this,
-kindlemodding.org will have whatever the up-to-date equivalent is — that site, not
+kindlemodding.org will have whatever the up-to-date equivalent is - that site, not
 this document, is the source of truth for jailbreaking itself.
 
 ## After jailbreaking: getting KUAL and KOReader on
 
 This dashboard runs standalone (see `kindle-daemon/README.md` for why), but still
 needs **KUAL** (a launcher menu for jailbroken Kindles) and **KOReader** (an e-reader
-app this project borrows a couple of binaries from — `fbink` for drawing to the
+app this project borrows a couple of binaries from - `fbink` for drawing to the
 screen, and `luajit` to actually run the dashboard code) installed first:
 
 1. **Hotfix** (a small compatibility patch some jailbreak tools need): download
    `Update_hotfix_universal.bin` from
    [github.com/KindleModding/Hotfix/releases](https://github.com/KindleModding/Hotfix/releases),
    place it at the root of the Kindle's storage, then on the device go to
-   Settings → **Update Your Kindle** — it applies automatically from the local file,
+   Settings → **Update Your Kindle** - it applies automatically from the local file,
    no internet connection needed for this step.
 2. **KUAL**: install via **PEKI** (the current community-preferred installer method).
    Follow kindlemodding.org's KUAL installation guide for the exact current steps.
@@ -75,4 +75,4 @@ screen, and `luajit` to actually run the dashboard code) installed first:
    should then appear as an option inside KUAL.
 
 Once KUAL and KOReader are both installed and working, you're ready to continue with
-this project's own setup — see `docs/LAUNCH_GUIDE.md`.
+this project's own setup - see `docs/LAUNCH_GUIDE.md`.

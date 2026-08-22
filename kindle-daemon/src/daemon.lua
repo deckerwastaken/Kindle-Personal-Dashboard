@@ -47,7 +47,7 @@ local json = require("json")
 local ui = require("ui")
 local battery = require("battery")
 
-ui.init(config.fbink_path, log)
+ui.init(config.fbink_path, log, config.fbink_image_path, config.lock_screen_image_paths)
 
 -- Probe the battery once at startup and cache whichever source worked
 -- (see src/battery.lua for the ranked chain and why it's probed once
@@ -227,8 +227,8 @@ end
 -- rather than some call sites remembering to set it and others not.
 -- Declared up here (immediately after now_ms(), its only dependency)
 -- rather than down with the rest of the UI-mode state below, specifically
--- so handle_restart_ssh() further down can already use it -- Lua locals
--- must be declared before use, no hoisting.
+-- so the several tap handlers further down that call show_flash() can
+-- already use it -- Lua locals must be declared before use, no hoisting.
 local flash_expire_at_ms = nil
 local FLASH_DURATION_MS = 3000
 
@@ -276,6 +276,33 @@ local screen_locked = false
 local pin_entry_active = false
 local pin_buffer = ""
 
+-- Network Info popup (dashboard only, see the footer button in
+-- draw_dashboard): the same "flag that overlays everything else, not a
+-- ui_mode" treatment pin_entry_active gets above, and for the identical
+-- reason -- dismissing it just needs to restore the dashboard, which
+-- redraw() already knows how to draw, rather than this file remembering
+-- a separate screen to return to.
+--
+-- network_info_popup_info is what was drawn (the {ssid=, ipv4=, mask=,
+-- gateway=, signal=, mac=} table from get_network_info() below) -- kept
+-- around so redraw() can re-assert the popup on top of itself if some
+-- UNRELATED redraw fires while it's showing (a backend state push, the
+-- periodic clock tick both call redraw() on their own timers, with no
+-- idea a popup is up) -- see redraw()'s own popup-reassert block further
+-- down.
+-- network_info_popup_box is the last-drawn box rect (ui.lua's return
+-- value), checked against a tap's (x, y) to tell "inside the popup,
+-- ignore" from "outside, dismiss" -- see handle_gesture below.
+--
+-- Declared here, alongside pin_entry_active, so set_screen_locked further
+-- down (which clears all four on every real lock transition -- see its
+-- own comment) can already see them.
+local network_info_popup_active = false
+local network_info_popup_info = nil
+local network_info_popup_box = nil
+local network_info_popup_expire_at_ms = nil
+local NETWORK_INFO_POPUP_DURATION_MS = 10000
+
 -- When the last real user input (tap, swipe, power button) happened.
 -- Backend state pushes deliberately do NOT count: the dashboard updating
 -- itself in the corner of the room is not somebody using it, and if it
@@ -312,29 +339,26 @@ local function show_flash(text)
     flash_expire_at_ms = now_ms() + FLASH_DURATION_MS
 end
 
---- Run a shell command and capture its combined stdout+stderr output, for
---- the one feature (Restart SSH) that actually needs to see what a shell
---- command printed rather than just fire-and-forget it. Everywhere else
---- in this codebase (ui.lua, tools/*.lua) uses os.execute() instead,
---- since they only ever cared about pass/fail, not output -- io.popen is
---- the standard Lua idiom for the "I need the output" case os.execute
---- can't cover.
+--- Run a shell command and capture its combined stdout+stderr output --
+--- used by get_network_info() below (ifconfig/route/iw all need their
+--- output parsed, not just a pass/fail). Everywhere else in this
+--- codebase (ui.lua, tools/*.lua) uses os.execute() instead, since they
+--- only ever cared about pass/fail, not output -- io.popen is the
+--- standard Lua idiom for the "I need the output" case os.execute can't
+--- cover.
 ---
 --- Returns (output_string, close_ok). close_ok mirrors the same
 --- platform-dependent looseness ui.lua's M.run() already documents for
 --- os.execute()'s return value -- treat it as informational, not as the
---- sole source of truth (the Restart SSH feature re-checks with a real
---- process check afterward rather than trusting this alone; see
---- handle_restart_ssh below).
+--- sole source of truth (get_network_info() below never relies on it,
+--- only on whether it could find what it was looking for in the output).
+---
+--- Wrapped in a subshell before appending 2>&1 rather than appending the
+--- redirection to the bare command -- harmless for the single commands
+--- this is currently called with, but keeps this safe to reuse for a
+--- future multi-statement command without that being a silent trap (a
+--- bare `cmd1; cmd2 2>&1` only redirects cmd2's stderr).
 local function shell_capture(cmd)
-    -- Wrap in a subshell before appending 2>&1: config.ssh_restart_cmd is
-    -- a multi-statement compound command (cd && dropbear; iptables ...;
-    -- iptables ...) -- appending redirection to the bare string only
-    -- scopes it over the LAST clause, silently dropping stderr from
-    -- every earlier statement, which is exactly the diagnostic most
-    -- likely to explain a failure (e.g. `cd` failing because
-    -- config.lua's koreader path is wrong). The parens make the
-    -- redirection apply to the whole compound command instead.
     local fh = io.popen("(" .. cmd .. ") 2>&1")
     if not fh then
         return nil, false
@@ -344,55 +368,65 @@ local function shell_capture(cmd)
     return output, (close_ok == true)
 end
 
---- CONFIRMED ON HARDWARE (2026-08-02, live SSH session): dropbear is the
---- process KOReader's own SSH.koplugin starts, and it's a real running
---- process (not just a pidfile) whenever SSH is up. Uses `ps | grep` with
---- the classic "[d]ropbear" bracket trick (so the grep process's own argv
---- doesn't match itself) rather than `pgrep -f dropbear` -- pgrep's
---- presence on this device's busybox build was not separately confirmed,
---- while `ps`/`grep` are already relied on elsewhere in this project's
---- tooling assumptions, so this is the more conservative choice.
-local function is_dropbear_running()
-    local output = shell_capture("ps | grep '[d]ropbear'")
-    return output ~= nil and output:find("%S") ~= nil
-end
+--- Gathers what the "Network Info" popup shows: the connected Wi-Fi
+--- network, IPv4 address, subnet mask, gateway, signal strength, and MAC
+--- address. CONFIRMED ON HARDWARE (2026-08-21, live SSH session) -- the
+--- three command output formats parsed below were captured directly from
+--- this device, not assumed:
+---
+---   `ifconfig wlan0` ->
+---     "inet addr:192.168.100.232  Bcast:...  Mask:255.255.255.0"
+---     "HWaddr 74:C2:46:D4:7A:C3"
+---   `route -n` ->
+---     "0.0.0.0         192.168.100.1   0.0.0.0         UG ... wlan0"
+---     (matched by scanning each line for one starting "0.0.0.0", i.e.
+---     the default route, rather than a fixed line number -- route -n's
+---     other row, the local subnet route, has no gateway of its own and
+---     would parse as garbage if this ever matched the wrong line)
+---   `iw dev wlan0 link` ->
+---     "SSID: Basik#Ops" / "signal: -41 dBm"
+---
+--- Any field whose command fails, or whose output doesn't match (e.g.
+--- wifi momentarily disconnected), reads "unknown" for just that one
+--- line rather than aborting the whole popup -- a partial reading is
+--- still useful, the same "never let one bad field hide the rest"
+--- treatment battery.lua's M.read() gets.
+---
+--- Returns a flat table with FIXED keys ({ssid=, ipv4=, mask=, gateway=,
+--- signal=, mac=}), not a generic label/value array -- ui.lua's
+--- M.draw_network_info_popup() gives each of these a different visual
+--- role (a black-inverted hero for ipv4, a secondary row for ssid, a
+--- divider-column list for the other four), so the shape here needs to
+--- match what that layout actually needs, not describe six interchangeable
+--- rows the way the original list-style popup did.
+local function get_network_info()
+    local ifcfg = shell_capture("ifconfig wlan0") or ""
+    local ip = ifcfg:match("inet addr:([%d%.]+)") or "unknown"
+    local mask = ifcfg:match("Mask:([%d%.]+)") or "unknown"
+    local mac = ifcfg:match("HWaddr%s+(%S+)") or "unknown"
 
---- Handles the "Restart SSH" button: starts dropbear (KOReader's SSH
---- server) via config.ssh_restart_cmd if it isn't already running, and
---- always leaves the user with an on-screen toast saying what happened --
---- this is the one piece of on-device UI that exists specifically so a
---- lost SSH session can be recovered without a full device reboot.
-local function handle_restart_ssh()
-    log.info("restart_ssh: button tapped")
-    if is_dropbear_running() then
-        log.info("restart_ssh: dropbear already running, nothing to do")
-        show_flash("SSH already running")
-        return
+    local gateway = "unknown"
+    local route_out = shell_capture("route -n") or ""
+    for line in route_out:gmatch("[^\r\n]+") do
+        local gw = line:match("^0%.0%.0%.0%s+(%S+)")
+        if gw then
+            gateway = gw
+            break
+        end
     end
 
-    if not config.ssh_restart_cmd or config.ssh_restart_cmd == "" then
-        log.warn("restart_ssh: config.ssh_restart_cmd is not set in config.lua")
-        show_flash("SSH restart not configured")
-        return
-    end
+    local link_out = shell_capture("iw dev wlan0 link") or ""
+    local ssid = link_out:match('SSID:%s*(.-)%s*[\r\n]') or "unknown"
+    local signal = link_out:match("signal:%s*(-?%d+ dBm)") or "unknown"
 
-    log.info("restart_ssh: dropbear not running, attempting to start it")
-    local output = shell_capture(config.ssh_restart_cmd)
-    log.info("restart_ssh: command output: " .. tostring(output))
-
-    -- dropbear daemonizes itself (forks to background) rather than
-    -- blocking, per the confirmed start command this mirrors -- give it
-    -- a brief moment before re-checking rather than racing the fork.
-    os.execute("sleep 1")
-
-    if is_dropbear_running() then
-        log.info("restart_ssh: dropbear started successfully")
-        show_flash("SSH started (port 2222)")
-    else
-        log.warn("restart_ssh: dropbear still not running after start attempt")
-        local trimmed = (output or ""):gsub("%s+$", ""):sub(1, 60)
-        show_flash("SSH start failed" .. (trimmed ~= "" and (": " .. trimmed) or ""))
-    end
+    return {
+        ssid = ssid,
+        ipv4 = ip,
+        mask = mask,
+        gateway = gateway,
+        signal = signal,
+        mac = mac,
+    }
 end
 
 local function try_connect()
@@ -432,6 +466,7 @@ local learning_page = 1 -- the same, for the Learning screen. Kept
                          -- separate from task_page so switching tabs
                          -- back and forth doesn't reset where you were
                          -- in the other list.
+local daily_page = 1 -- the same, for the Daily screen.
 
 -- UI mode: which screen is currently on the e-ink display and therefore
 -- which set of hit_zones current_hit_zones holds. daemon.lua is the sole
@@ -443,30 +478,45 @@ local learning_page = 1 -- the same, for the Learning screen. Kept
 --                  nav bar. Read-only on the device: every learning
 --                  edit needs a number, and the on-screen keyboard has
 --                  no digits, so Telegram owns all mutation.
+--   "daily"     -- the Daily habits checklist, reached from the nav bar.
+--                  UNLIKE Learning, toggling done and deleting an item
+--                  both happen on the device (see handle_daily_tap) --
+--                  only ADDING a new item needs Telegram, since only
+--                  that needs a digit (a time-of-day).
 --   "keyboard"  -- the on-screen keyboard for the Add Task flow
 --   "confirm_exit" -- the Exit Dashboard confirmation screen
 local ui_mode = "dashboard"
 
--- Which nav tab each ui_mode corresponds to. Only the two screens that
+-- Which nav tab each ui_mode corresponds to. Only the screens that
 -- actually draw a nav bar appear here; the keyboard and exit-confirm
 -- screens draw none, and nil is the right answer for them (see the
 -- toast-dismiss path, which must not paint a nav bar over a screen that
 -- doesn't have one).
-local UI_MODE_TAB = { dashboard = "Today", learning = "Learning" }
+local UI_MODE_TAB = { dashboard = "Today", learning = "Learning", daily = "Daily" }
 
 -- Which ui_mode a nav tab switches to, for the tabs that are real
 -- screens. Anything absent is still a "coming soon" stub.
-local TAB_UI_MODE = { Today = "dashboard", Learning = "learning" }
+local TAB_UI_MODE = { Today = "dashboard", Learning = "learning", Daily = "daily" }
 
 -- Add Task flow state (only meaningful while ui_mode == "keyboard").
 local keyboard_buffer = ""
 
--- Delete-armed state (only meaningful while ui_mode == "dashboard"): the
--- id of a task whose delete zone was tapped once and is now waiting for
--- a confirming second tap within DELETE_CONFIRM_WINDOW_MS. Reuses the
--- now_ms() monotonic-ish clock already defined above, same as the
--- websocket reconnect backoff does.
+-- Delete-armed state: the id of a row (a TASK on the dashboard, or a
+-- DAILY item on the Daily screen) whose delete zone was tapped once and
+-- is now waiting for a confirming second tap within
+-- DELETE_CONFIRM_WINDOW_MS. Reuses the now_ms() monotonic-ish clock
+-- already defined above, same as the websocket reconnect backoff does.
+--
+-- armed_delete_kind ("task" or "daily") disambiguates WHICH list
+-- armed_delete_id belongs to -- tasks and daily items are separate id
+-- sequences (see state.py), so id=3 can mean two different rows. Every
+-- site that sets armed_delete_id also sets this alongside it, and every
+-- site that clears one clears both, so the two can never point at
+-- different lists. handle_nav_tap additionally clears both unconditionally
+-- on any tab switch, closing the edge case where a stale armed id from
+-- one screen could otherwise be mistaken for a row on the other.
 local armed_delete_id = nil
+local armed_delete_kind = nil
 local armed_delete_until_ms = 0
 local DELETE_CONFIRM_WINDOW_MS = 4000
 
@@ -484,6 +534,12 @@ local function redraw(reason)
     end
 
     log.info("redraw: " .. reason .. " (mode=" .. ui_mode .. ")")
+    -- armed_delete_id is only ever meaningful on the ONE screen it was
+    -- armed on (see armed_delete_kind's doc comment above) -- passing it
+    -- to the other screen's draw call would risk highlighting an
+    -- unrelated row that happens to share the same numeric id.
+    local dashboard_armed_id = (armed_delete_kind == "task") and armed_delete_id or nil
+    local daily_armed_id = (armed_delete_kind == "daily") and armed_delete_id or nil
     local ok, hit_zones_or_err, effective_page = pcall(function()
         if ui_mode == "keyboard" then
             return ui.draw_keyboard(keyboard_buffer)
@@ -491,8 +547,10 @@ local function redraw(reason)
             return ui.draw_confirm_exit()
         elseif ui_mode == "learning" then
             return ui.draw_learning(current_state, conn_status, learning_page, battery_percent)
+        elseif ui_mode == "daily" then
+            return ui.draw_daily(current_state, conn_status, daily_page, daily_armed_id, battery_percent)
         else
-            return ui.draw_dashboard(current_state, conn_status, task_page, armed_delete_id, battery_percent)
+            return ui.draw_dashboard(current_state, conn_status, task_page, dashboard_armed_id, battery_percent)
         end
     end)
     if ok then
@@ -506,10 +564,33 @@ local function redraw(reason)
             task_page = effective_page or task_page
         elseif ui_mode == "learning" then
             learning_page = effective_page or learning_page
+        elseif ui_mode == "daily" then
+            daily_page = effective_page or daily_page
         end
         last_clock_redraw_ms = now_ms()
     else
         log.error("redraw failed: " .. tostring(hit_zones_or_err))
+    end
+
+    -- Re-assert the Network Info popup on top, if one is currently
+    -- showing. redraw() above just repainted the WHOLE dashboard from
+    -- scratch (a state push, the periodic clock tick, anything else that
+    -- calls redraw()/redraw_if_dashboard() has no idea a popup is up),
+    -- which would otherwise silently erase it mid-display. This is the
+    -- single choke point for that -- every redraw() call, whatever
+    -- triggered it, leaves the popup exactly as visible as it was before,
+    -- for its own unrelated 10s timer (see network_info_popup_expire_at_ms)
+    -- to dismiss on its own schedule. Only reachable with ui_mode ==
+    -- "dashboard" (the only screen the button lives on, and nothing while
+    -- the popup is active changes ui_mode -- see handle_gesture), so
+    -- there is no "popup redrawn over the wrong screen" case to guard.
+    if ok and network_info_popup_active then
+        local pok, pbox = pcall(ui.draw_network_info_popup, network_info_popup_info)
+        if pok then
+            network_info_popup_box = pbox
+        else
+            log.error("network info popup: re-draw failed (" .. tostring(pbox) .. ")")
+        end
     end
 end
 
@@ -531,21 +612,21 @@ local function redraw_if_dashboard(reason)
 end
 
 --- Like redraw_if_dashboard(), but for changes that affect EVERY screen
---- which renders backend state -- currently the dashboard and the
---- Learning list. A fresh state push changes the learning list just as
---- much as it changes the task list, and the connection badge is drawn
---- on both, so gating those on "dashboard only" would leave the Learning
---- screen showing stale progress with no indication anything was wrong.
+--- which renders backend state -- currently the dashboard, the Learning
+--- list, and the Daily list. A fresh state push changes those lists just
+--- as much as it changes the task list, and the connection badge is
+--- drawn on all three, so gating this on "dashboard only" would leave
+--- the other two screens showing stale progress with no indication
+--- anything was wrong.
 ---
 --- Kept as a SEPARATE helper from redraw_if_dashboard rather than
---- widening that one, because the two remaining callers of the narrower
---- version are genuinely dashboard-only concerns: the periodic clock
---- tick (the Learning screen has no clock, so redrawing it on that
+--- widening that one, because its one remaining caller (the periodic
+--- clock tick) is a genuinely dashboard-only concern: neither the
+--- Learning nor Daily screen draws a clock, so redrawing them on that
 --- timer would be a full-screen e-ink flash for a pixel that didn't
---- change) and the delete-confirmation expiry (an armed task delete
---- only exists on the dashboard).
+--- change.
 local function redraw_if_showing_state(reason)
-    if ui_mode == "dashboard" or ui_mode == "learning" then
+    if ui_mode == "dashboard" or ui_mode == "learning" or ui_mode == "daily" then
         redraw(reason)
     end
 end
@@ -567,6 +648,20 @@ local function set_screen_locked(locked, reason)
         log.info("screen LOCKED (" .. reason .. ") -- blanking, and pausing " ..
             "the clock redraw, battery poll, and touch input")
         current_hit_zones = {}
+        -- A showing Network Info popup has nothing left to overlay once
+        -- the screen goes blank, and leaving its state dangling would
+        -- replay a now-stale reading on top of the dashboard the moment
+        -- this unlocks again (redraw()'s own popup-reassert block has no
+        -- way to know the popup's 10s window should have expired while
+        -- nobody could see it). Safe to clear unconditionally here: the
+        -- popup can only ever become active from the dashboard while
+        -- already unlocked (see network_info_popup_active's own doc
+        -- comment), so this is never reached WHILE the popup is showing
+        -- without this actually being a real false->true transition.
+        network_info_popup_active = false
+        network_info_popup_info = nil
+        network_info_popup_box = nil
+        network_info_popup_expire_at_ms = nil
         local ok, err = pcall(ui.draw_blank_screen)
         if not ok then
             -- Don't leave the flag claiming "locked" over a screen that
@@ -622,6 +717,42 @@ local function cancel_pin_entry(reason)
     end
 end
 
+--- Handles the "Network Info" button: gathers a fresh reading (so the
+--- popup never shows a stale IP from an earlier tap) and draws it
+--- straight over the current dashboard pixels -- deliberately NOT a
+--- redraw() first, since the dashboard underneath is already correct and
+--- a full redraw would cost an unnecessary full-screen e-ink flash just
+--- to then draw the popup on top of it.
+local function handle_show_network_info()
+    log.info("network_info: button tapped")
+    network_info_popup_info = get_network_info()
+    local ok, box = pcall(ui.draw_network_info_popup, network_info_popup_info)
+    if not ok then
+        log.error("network info popup: draw failed (" .. tostring(box) .. ")")
+        network_info_popup_info = nil
+        return
+    end
+    network_info_popup_active = true
+    network_info_popup_box = box
+    network_info_popup_expire_at_ms = now_ms() + NETWORK_INFO_POPUP_DURATION_MS
+end
+
+--- Dismisses the Network Info popup, however it ended (the 10s timeout,
+--- or a tap outside the box -- see handle_gesture and the main loop's
+--- auto-dismiss check below, the only two callers). Always a full
+--- redraw(): unlike the toast (M.clear_flash_message(), which only needs
+--- to repaint the narrow nav-bar strip it overlaid), this popup can sit
+--- over a good chunk of the task list, so there is no cheaper "just this
+--- strip" region to restore instead.
+local function dismiss_network_info_popup(reason)
+    log.info("network info popup: dismissed (" .. reason .. ")")
+    network_info_popup_active = false
+    network_info_popup_info = nil
+    network_info_popup_box = nil
+    network_info_popup_expire_at_ms = nil
+    redraw(reason)
+end
+
 local function zone_contains(z, x, y)
     return x >= z.x and x < z.x + z.w and y >= z.y and y < z.y + z.h
 end
@@ -648,6 +779,7 @@ end
 local GESTURE_ZONE_KINDS = {
     task_swipe_area = true,
     learning_swipe_area = true,
+    daily_swipe_area = true,
 }
 
 --- Resolves a TAP: the first non-gesture zone containing the point.
@@ -690,6 +822,14 @@ local function handle_nav_tap(zone)
         -- something the highlighted tab already shows.
         return
     end
+    -- Belt-and-suspenders clear, alongside the per-screen gating each of
+    -- handle_dashboard_tap/handle_daily_tap already does (see
+    -- armed_delete_kind's doc comment above for why a stale id from one
+    -- screen must never be read as a row on the other): every tab switch
+    -- starts from a clean slate, whether or not this was actually
+    -- reachable in practice.
+    armed_delete_id = nil
+    armed_delete_kind = nil
     ui_mode = target_mode
     redraw("switched to the " .. zone.name .. " tab")
 end
@@ -702,7 +842,7 @@ local function handle_dashboard_tap(zone)
     -- deliberate: while a delete confirmation is showing, a stray tap
     -- elsewhere should read as "never mind, cancel that", not as
     -- simultaneously cancelling AND performing some unrelated action.
-    if armed_delete_id ~= nil then
+    if armed_delete_id ~= nil and armed_delete_kind == "task" then
         local n = now_ms()
         local still_armed = n < armed_delete_until_ms
         if still_armed and zone and zone.kind == "delete_task_zone" and zone.id == armed_delete_id then
@@ -722,6 +862,7 @@ local function handle_dashboard_tap(zone)
                 if send_ok then
                     log.info("sent delete_task id=" .. tostring(armed_delete_id))
                     armed_delete_id = nil
+                    armed_delete_kind = nil
                 else
                     -- conn_status can still read "open" here even though
                     -- the write itself just failed -- conn_status only
@@ -736,6 +877,7 @@ local function handle_dashboard_tap(zone)
             else
                 failure_toast = "Not connected -- can't delete tasks right now"
                 armed_delete_id = nil
+                armed_delete_kind = nil
             end
             redraw("delete confirmed")
             if failure_toast then
@@ -745,6 +887,7 @@ local function handle_dashboard_tap(zone)
         else
             log.info("delete confirmation disarmed (tapped elsewhere or window expired)")
             armed_delete_id = nil
+            armed_delete_kind = nil
             redraw("delete disarmed")
             return
         end
@@ -769,6 +912,7 @@ local function handle_dashboard_tap(zone)
         end
     elseif zone.kind == "delete_task_zone" then
         armed_delete_id = zone.id
+        armed_delete_kind = "task"
         armed_delete_until_ms = now_ms() + DELETE_CONFIRM_WINDOW_MS
         log.info("delete armed for task id=" .. tostring(zone.id))
         redraw("delete armed")
@@ -793,8 +937,8 @@ local function handle_dashboard_tap(zone)
     elseif zone.kind == "exit_dashboard_button" then
         ui_mode = "confirm_exit"
         redraw("exit dashboard tapped, showing confirmation")
-    elseif zone.kind == "restart_ssh_button" then
-        handle_restart_ssh()
+    elseif zone.kind == "network_info_button" then
+        handle_show_network_info()
     elseif zone.kind == "refresh_usage_button" then
         if conn and conn_status == "open" then
             local send_ok, send_err = conn:send_text(json.encode({ action = "refresh_usage" }))
@@ -829,6 +973,85 @@ local function handle_learning_tap(zone)
         if zone.target == "learning" then
             learning_page = zone.page
             redraw("jumped to learning page " .. tostring(zone.page))
+        end
+    elseif zone.kind == "nav_tab" then
+        handle_nav_tap(zone)
+    end
+end
+
+--- The Daily screen supports toggling done and deleting an item ON THE
+--- DEVICE (unlike Learning, which is fully read-only) -- see
+--- draw_daily_row's own comment in ui.lua for why: neither toggle nor
+--- delete needs a digit, only ADDING a new item does, and that stays
+--- Telegram-only.
+---
+--- Structurally this is a smaller copy of handle_dashboard_tap: the same
+--- delete-arm/confirm/disarm priority gate, the same toggle/delete zone
+--- kinds ("_daily" instead of "_task"). There is no add/exit/ssh/
+--- refresh_usage zone on this screen at all, so there is nothing to
+--- dispatch to for those kinds.
+local function handle_daily_tap(zone)
+    if armed_delete_id ~= nil and armed_delete_kind == "daily" then
+        local n = now_ms()
+        local still_armed = n < armed_delete_until_ms
+        if still_armed and zone and zone.kind == "delete_daily_zone" and zone.id == armed_delete_id then
+            local failure_toast = nil
+            if conn and conn_status == "open" then
+                local send_ok, send_err = conn:send_text(json.encode({ action = "delete_daily", id = armed_delete_id }))
+                if send_ok then
+                    log.info("sent delete_daily id=" .. tostring(armed_delete_id))
+                    armed_delete_id = nil
+                    armed_delete_kind = nil
+                else
+                    log.warn("delete_daily send failed: " .. tostring(send_err))
+                    failure_toast = "Couldn't send -- not connected?"
+                end
+            else
+                failure_toast = "Not connected -- can't delete daily habits right now"
+                armed_delete_id = nil
+                armed_delete_kind = nil
+            end
+            redraw("daily delete confirmed")
+            if failure_toast then
+                show_flash(failure_toast)
+            end
+            return
+        else
+            log.info("daily delete confirmation disarmed (tapped elsewhere or window expired)")
+            armed_delete_id = nil
+            armed_delete_kind = nil
+            redraw("daily delete disarmed")
+            return
+        end
+    end
+
+    if not zone then
+        log.info("tap did not hit any known zone")
+        return
+    end
+
+    if zone.kind == "toggle_daily" then
+        if conn and conn_status == "open" then
+            local send_ok, send_err = conn:send_text(json.encode({ action = "toggle_daily", id = zone.id }))
+            if send_ok then
+                log.info("sent toggle_daily id=" .. tostring(zone.id))
+            else
+                log.warn("toggle_daily send failed: " .. tostring(send_err))
+                show_flash("Couldn't send -- not connected?")
+            end
+        else
+            show_flash("Not connected -- can't update daily habits right now")
+        end
+    elseif zone.kind == "delete_daily_zone" then
+        armed_delete_id = zone.id
+        armed_delete_kind = "daily"
+        armed_delete_until_ms = now_ms() + DELETE_CONFIRM_WINDOW_MS
+        log.info("delete armed for daily id=" .. tostring(zone.id))
+        redraw("daily delete armed")
+    elseif zone.kind == "page_prev" or zone.kind == "page_next" or zone.kind == "page_goto" then
+        if zone.target == "daily" then
+            daily_page = zone.page
+            redraw("jumped to daily page " .. tostring(zone.page))
         end
     elseif zone.kind == "nav_tab" then
         handle_nav_tap(zone)
@@ -986,6 +1209,8 @@ local function handle_tap(x, y)
         handle_confirm_exit_tap(zone)
     elseif ui_mode == "learning" then
         handle_learning_tap(zone)
+    elseif ui_mode == "daily" then
+        handle_daily_tap(zone)
     else
         handle_dashboard_tap(zone)
     end
@@ -1025,6 +1250,8 @@ local function handle_swipe(gesture)
         zone_kind, current_page = "task_swipe_area", task_page
     elseif ui_mode == "learning" then
         zone_kind, current_page = "learning_swipe_area", learning_page
+    elseif ui_mode == "daily" then
+        zone_kind, current_page = "daily_swipe_area", daily_page
     else
         return
     end
@@ -1049,6 +1276,8 @@ local function handle_swipe(gesture)
 
     if ui_mode == "dashboard" then
         task_page = new_page
+    elseif ui_mode == "daily" then
+        daily_page = new_page
     else
         learning_page = new_page
     end
@@ -1083,6 +1312,29 @@ local function handle_gesture(gesture)
         -- treatment as a drag on the keyboard/exit-confirm screens below.
         if gesture.kind == "tap" then
             handle_pin_entry_tap(gesture.x, gesture.y)
+        end
+        return
+    end
+
+    -- Network Info popup: takes every tap while it's up, the same
+    -- priority pin_entry_active gets above and for the same reason -- a
+    -- tap meant for "dismiss this" or "yes I saw it, leave it" must never
+    -- also fall through and act on whatever's underneath (a task
+    -- checkbox, the delete-armed window, another footer button). A tap
+    -- INSIDE the box is a deliberate no-op (read the info, don't dismiss
+    -- yet); OUTSIDE it dismisses, per the popup's own "tap outside to
+    -- close" hint. Swipes/drags are silently swallowed, matching the
+    -- keyboard/exit-confirm screens: there's no paged content here to
+    -- swipe either.
+    if network_info_popup_active then
+        if gesture.kind == "tap" then
+            local inside = network_info_popup_box and
+                zone_contains(network_info_popup_box, gesture.x, gesture.y)
+            if inside then
+                log.info("tap inside network info popup -- ignored")
+            else
+                dismiss_network_info_popup("tapped outside network info popup")
+            end
         end
         return
     end
@@ -1181,6 +1433,7 @@ local function compute_poll_timeout()
         until_deadline(last_clock_redraw_ms + config.clock_redraw_interval_ms)
         until_deadline(last_battery_poll_ms + BATTERY_POLL_INTERVAL_MS)
         if flash_expire_at_ms then until_deadline(flash_expire_at_ms) end
+        if network_info_popup_expire_at_ms then until_deadline(network_info_popup_expire_at_ms) end
         if armed_delete_id ~= nil then until_deadline(armed_delete_until_ms) end
         if AUTO_LOCK_IDLE_MS then until_deadline(last_input_ms + AUTO_LOCK_IDLE_MS) end
     end
@@ -1539,20 +1792,25 @@ while true do
 
         -- --- delete-confirmation expiry ---
         -- armed_delete_id is only cleared by a follow-up tap (confirm or
-        -- disarm, see handle_dashboard_tap) -- if the user just walks away
-        -- mid-confirmation, nothing else was clearing it, so the row kept
-        -- showing the "tap again to delete" highlight indefinitely after
-        -- DELETE_CONFIRM_WINDOW_MS actually elapsed (a stray tap after
-        -- that point was still handled correctly as a no-op disarm, since
-        -- handle_dashboard_tap checks the deadline too -- but the on-screen
-        -- state was lying about the window still being open until then).
-        -- Checked every loop iteration (poll_timeout_ms cadence) so the
-        -- highlight clears itself promptly instead of waiting for the
-        -- next unrelated redraw.
+        -- disarm, see handle_dashboard_tap/handle_daily_tap) -- if the
+        -- user just walks away mid-confirmation, nothing else was
+        -- clearing it, so the row kept showing the "tap again to delete"
+        -- highlight indefinitely after DELETE_CONFIRM_WINDOW_MS actually
+        -- elapsed (a stray tap after that point was still handled
+        -- correctly as a no-op disarm, since both tap handlers check the
+        -- deadline too -- but the on-screen state was lying about the
+        -- window still being open until then). Checked every loop
+        -- iteration (poll_timeout_ms cadence) so the highlight clears
+        -- itself promptly instead of waiting for the next unrelated
+        -- redraw. redraw_if_showing_state (not the narrower
+        -- redraw_if_dashboard) so this also clears the highlight when the
+        -- armed row is a daily item and the Daily screen is what's
+        -- showing.
         if armed_delete_id ~= nil and now_ms() >= armed_delete_until_ms then
             log.info("delete confirmation expired (no follow-up tap)")
             armed_delete_id = nil
-            redraw_if_dashboard("delete confirmation expired")
+            armed_delete_kind = nil
+            redraw_if_showing_state("delete confirmation expired")
         end
 
         -- --- toast auto-dismiss ---
@@ -1586,6 +1844,17 @@ while true do
             if active_tab and not screen_locked then
                 ui.clear_flash_message(active_tab)
             end
+        end
+
+        -- --- network info popup auto-dismiss ---
+        -- No lock check needed here, unlike the toast above: locking
+        -- already clears network_info_popup_expire_at_ms unconditionally
+        -- (see set_screen_locked), so this can never fire while locked in
+        -- the first place -- if it's non-nil, the popup is genuinely
+        -- still showing and dismiss_network_info_popup()'s own redraw()
+        -- is the correct, safe way to clear it.
+        if network_info_popup_expire_at_ms ~= nil and now_ms() >= network_info_popup_expire_at_ms then
+            dismiss_network_info_popup("10s auto-dismiss")
         end
 
         -- --- periodic battery poll ---

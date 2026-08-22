@@ -23,9 +23,11 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
+
+from . import google_sheets
 
 logger = logging.getLogger("kindle_dashboard.state")
 
@@ -35,6 +37,9 @@ DEFAULT_STATE = {
     "claude_usage": {"tokens_today": 0, "last_updated": ""},
     "session_usage": {"percent": 0, "resets_at": "", "resets_label": "", "last_updated": ""},
     "lock_pin": "",
+    "dailies": [],
+    "daily_history": {},
+    "daily_last_reset": "",
     "last_updated": "",
 }
 
@@ -62,6 +67,12 @@ class StateStore:
         self._lock = asyncio.Lock()
         self._data: dict = self._load()
         self._broadcast_cb: Optional[BroadcastCallback] = None
+        # Fire-and-forget Google Sheets sync tasks (see _fire_live_daily_sync
+        # below) -- held here only so asyncio doesn't garbage-collect a task
+        # while it's still in flight, a well-known asyncio.create_task()
+        # footgun. Discarded via the task's own done-callback, so this never
+        # grows unbounded.
+        self._background_sync_tasks: set = set()
 
     def set_broadcast_callback(self, cb: BroadcastCallback) -> None:
         self._broadcast_cb = cb
@@ -85,6 +96,10 @@ class StateStore:
                 )
                 # Existing state.json files predate the PIN lock feature too.
                 data.setdefault("lock_pin", "")
+                # ...and the Daily habits feature.
+                data.setdefault("dailies", [])
+                data.setdefault("daily_history", {})
+                data.setdefault("daily_last_reset", "")
                 data.setdefault("last_updated", "")
                 logger.info(
                     "Loaded existing state from %s (%d tasks, %d learnings)",
@@ -131,8 +146,21 @@ class StateStore:
             raise
 
     def snapshot(self) -> dict:
-        """A deep copy of the current state, safe to hand out / serialize."""
-        return copy.deepcopy(self._data)
+        """A deep copy of the current state, safe to hand out / serialize.
+
+        `dailies` is sorted by time-of-day here, at the wire boundary,
+        rather than at storage time -- internal storage stays in insertion
+        (creation) order, which keeps add_daily/toggle_daily/delete_daily
+        simple, while every consumer of a snapshot (the Kindle, `/state`,
+        Telegram's /list and /dailyhistory) gets a day laid out in
+        chronological order for free, matching the "Google Calendar day
+        view" the Daily tab is modeled on. Python's sort is stable, so two
+        items at the identical minute keep their relative creation order
+        rather than shuffling on every redraw.
+        """
+        data = copy.deepcopy(self._data)
+        data["dailies"] = sorted(data["dailies"], key=lambda d: d["minutes"])
+        return data
 
     async def _commit_locked(self) -> None:
         """Must be called while holding self._lock. Stamps last_updated
@@ -436,6 +464,228 @@ class StateStore:
             await self._broadcast()
         return found
 
+    # ---------- daily habits ----------
+    #
+    # A recurring checklist, modeled on a calendar day view rather than a
+    # to-do list: each item has a time-of-day and a topic, and the LIST of
+    # items persists forever -- only each item's `done` flag resets, once a
+    # day, at local midnight (see maybe_reset_dailies below). Telegram is
+    # the only way to ADD an item (a time is a number, and the Kindle's
+    # on-screen keyboard has no digits -- same reasoning as Learning), but
+    # unlike Learning, toggling done and deleting an item both happen ON
+    # the Kindle, reusing the exact tap/double-tap-to-delete interactions
+    # the Today task list already has, since neither needs a digit.
+    #
+    # `minutes` (0-1439, minutes since local midnight) is the sort key;
+    # `time` is a precomputed display string ("7:00 AM") computed ONCE by
+    # the Telegram command parser at add-time (see telegram_bot.py's
+    # _parse_time_of_day) and then just displayed verbatim everywhere --
+    # the Kindle draws it as plain text with zero time-formatting logic of
+    # its own, and Telegram's own replies reuse the same stored string, so
+    # there is exactly one place time-formatting rules live.
+
+    async def add_daily(self, minutes: int, time_display: str, topic: str) -> dict:
+        topic = topic[:MAX_TASK_TEXT_LEN]
+        async with self._lock:
+            existing_ids = [d["id"] for d in self._data["dailies"]]
+            new_id = (max(existing_ids) if existing_ids else 0) + 1
+            item = {
+                "id": new_id, "minutes": minutes, "time": time_display,
+                "topic": topic, "done": False,
+            }
+            self._data["dailies"].append(item)
+            await self._commit_locked()
+        await self._broadcast()
+        self._fire_live_daily_sync()
+        return item
+
+    async def list_dailies(self) -> list:
+        """Time-sorted, matching snapshot()'s wire-format ordering -- see
+        its doc comment for why sorting happens at the read boundary
+        rather than in storage."""
+        async with self._lock:
+            items = copy.deepcopy(self._data["dailies"])
+        return sorted(items, key=lambda d: d["minutes"])
+
+    async def get_daily(self, daily_id: int) -> Optional[dict]:
+        async with self._lock:
+            for d in self._data["dailies"]:
+                if d["id"] == daily_id:
+                    return copy.deepcopy(d)
+        return None
+
+    async def toggle_daily(self, daily_id: int) -> Optional[bool]:
+        """Flips a daily item's done flag (the Kindle checkbox-tap case,
+        mirrors toggle_task). Returns the new done state, or None if no
+        such item exists."""
+        new_state = None
+        async with self._lock:
+            for d in self._data["dailies"]:
+                if d["id"] == daily_id:
+                    d["done"] = not d["done"]
+                    new_state = d["done"]
+                    break
+            if new_state is not None:
+                await self._commit_locked()
+        if new_state is not None:
+            await self._broadcast()
+            self._fire_live_daily_sync()
+        return new_state
+
+    async def mark_daily_done(self, daily_id: int) -> Optional[dict]:
+        """Telegram's /done Dn -- always sets done=True (mirrors mark_done
+        for tasks), as opposed to the Kindle's checkbox tap, which toggles.
+        Returns the updated item, or None if no such item exists."""
+        found_item = None
+        async with self._lock:
+            for d in self._data["dailies"]:
+                if d["id"] == daily_id:
+                    d["done"] = True
+                    found_item = d
+                    break
+            if found_item is not None:
+                await self._commit_locked()
+        if found_item is not None:
+            await self._broadcast()
+            self._fire_live_daily_sync()
+        return copy.deepcopy(found_item) if found_item is not None else None
+
+    async def delete_daily(self, daily_id: int) -> bool:
+        found = False
+        async with self._lock:
+            before = len(self._data["dailies"])
+            self._data["dailies"] = [d for d in self._data["dailies"] if d["id"] != daily_id]
+            found = len(self._data["dailies"]) < before
+            if found:
+                await self._commit_locked()
+        if found:
+            await self._broadcast()
+            self._fire_live_daily_sync()
+        return found
+
+    def _fire_live_daily_sync(self) -> None:
+        """Best-effort, fire-and-forget push of TODAY's current daily-habit
+        state to Google Sheets, kicked off after every add/toggle/delete so
+        the sheet reflects same-day progress instead of only appearing a
+        full day late -- see maybe_reset_dailies below for the separate,
+        AUTHORITATIVE end-of-day write this doesn't replace.
+
+        Deliberately NOT awaited by any caller: an on-device checkbox tap
+        (or a Telegram reply) must never wait on a network round-trip to
+        Google, and must succeed identically whether or not Sheets sync is
+        even configured -- google_sheets.sync_day() already no-ops
+        instantly when it isn't, but this function doesn't even need to
+        know that; it just fires the task and returns.
+
+        Reads self._data directly without re-acquiring self._lock. Every
+        caller has ALREADY released the lock by the time it calls this (it
+        runs after their own `async with self._lock` block, alongside
+        their existing _broadcast() call) -- re-entering a non-reentrant
+        asyncio.Lock here would deadlock. The tiny theoretical race (another
+        mutation landing between release and this read) only affects a
+        best-effort mirror one sync-cycle early or late, never the local
+        source of truth, which is why it's an acceptable tradeoff here in a
+        way it wouldn't be for _commit_locked/_broadcast themselves.
+        """
+        today = date.today().isoformat()
+        items = [
+            {"id": d["id"], "time": d["time"], "topic": d["topic"], "done": d["done"]}
+            for d in self._data["dailies"]
+        ]
+
+        async def _run():
+            try:
+                ok, message = await google_sheets.sync_day(today, items)
+                if not ok:
+                    logger.warning("Daily habits: live Google Sheets sync skipped/failed: %s", message)
+            except Exception as e:
+                # google_sheets.sync_day is documented to never raise, but
+                # a background task's exception otherwise vanishes into
+                # asyncio's own "exception was never retrieved" log line
+                # instead of this module's own clearer one -- cheap
+                # insurance, not a sign the contract above is untrusted.
+                logger.error("Daily habits: unexpected error during live Google Sheets sync: %s", e)
+
+        task = asyncio.create_task(_run())
+        self._background_sync_tasks.add(task)
+        task.add_done_callback(self._background_sync_tasks.discard)
+
+    async def maybe_reset_dailies(self) -> bool:
+        """Checks whether the LOCAL calendar date has advanced past the
+        last recorded reset, and if so archives the outgoing day's
+        completion state (locally, and a best-effort authoritative push to
+        Google Sheets) and clears every daily item's `done` flag for the
+        new day. Returns True if a reset actually happened.
+
+        Deliberately keyed off the LOCAL date (date.today(), no tzinfo)
+        rather than UTC, unlike every timestamp elsewhere in this file --
+        "resets at midnight" means the user's own midnight, not UTC's.
+        Most US timezones sit 4-8 hours behind UTC, so using UTC here
+        would roll the checklist over mid-afternoon or mid-evening instead
+        of overnight.
+
+        Deliberately polled on a plain interval (see daily_reset.py)
+        rather than a precise sleep-until-midnight timer: this backend is
+        NOT always running -- the user starts/stops it by hand via the
+        ops/ scripts, and the laptop sleeps -- so a timer set to fire at
+        an exact wall-clock moment would simply never fire if the process
+        wasn't alive then. Comparing "is today different from the last
+        recorded reset date" self-heals regardless of how long the gap
+        was, at the cost of only ever being accurate to within one polling
+        interval.
+
+        If the backend was off across MORE than one midnight (the laptop
+        was closed for several days), only the single most recent prior
+        day gets archived under daily_history -- the days in between get
+        no entry at all, deliberately: there is no way to know what would
+        have been checked on a day nothing was running, and fabricating a
+        false "nothing done" record would be actively wrong, not just
+        incomplete. An ABSENT key in daily_history is therefore meaningful
+        on its own -- it means "no data for this date" -- and is distinct
+        from a PRESENT key mapping every item to False (a real day where
+        nothing was completed). Any code that reads daily_history (see
+        telegram_bot.py's /dailyhistory) must preserve that distinction
+        rather than treating a missing date as an all-False day.
+        """
+        today = date.today().isoformat()
+        async with self._lock:
+            if self._data["daily_last_reset"] == today:
+                return False
+
+            previous = self._data["daily_last_reset"]
+            outgoing_snapshot = None
+            if previous:
+                # Not the very first run ever (daily_last_reset starts as
+                # "" and every item starts at done=False, so there is
+                # nothing meaningful to archive the first time this runs).
+                self._data["daily_history"][previous] = {
+                    str(d["id"]): d["done"] for d in self._data["dailies"]
+                }
+                outgoing_snapshot = [
+                    {"id": d["id"], "time": d["time"], "topic": d["topic"], "done": d["done"]}
+                    for d in self._data["dailies"]
+                ]
+
+            for d in self._data["dailies"]:
+                d["done"] = False
+            self._data["daily_last_reset"] = today
+            await self._commit_locked()
+        await self._broadcast()
+
+        if outgoing_snapshot is not None:
+            try:
+                ok, message = await google_sheets.sync_day(previous, outgoing_snapshot)
+                log = logger.info if ok else logger.warning
+                log("Daily habits: end-of-day Google Sheets sync for %s -- %s", previous, message)
+            except Exception as e:
+                # As in _fire_live_daily_sync: sync_day is documented not
+                # to raise, but the local reset above has ALREADY
+                # committed and broadcast by this point regardless -- a
+                # Sheets failure here costs a log line, never a stuck
+                # checklist.
+                logger.error("Daily habits: unexpected error calling google_sheets.sync_day: %s", e)
+        return True
+
     # ---------- Claude usage ----------
 
     async def set_usage(self, tokens_today: int) -> None:
@@ -480,3 +730,31 @@ class StateStore:
             self._data["lock_pin"] = pin
             await self._commit_locked()
         await self._broadcast()
+
+    # ---------- daily habits: history + manual sync ----------
+
+    async def get_daily_history(self) -> dict:
+        """A copy of the full local daily_history archive, keyed by ISO
+        date string. Callers (currently only Telegram's /dailyhistory)
+        must treat an ABSENT date key as "no data recorded", distinct
+        from a PRESENT key mapping every item to False -- see
+        maybe_reset_dailies's doc comment for why that distinction
+        exists and must be preserved rather than collapsed."""
+        async with self._lock:
+            return copy.deepcopy(self._data["daily_history"])
+
+    async def force_daily_sync(self) -> tuple:
+        """Telegram's /dailysync -- an AWAITED push of today's current
+        daily-habit state to Google Sheets, unlike the silent
+        fire-and-forget _fire_live_daily_sync used after every
+        add/toggle/delete. Exists so a user setting up Sheets for the
+        first time gets a real success/failure message back instead of
+        having to guess whether a background task worked. Returns
+        google_sheets.sync_day's own (ok, message) tuple unchanged."""
+        today = date.today().isoformat()
+        async with self._lock:
+            items = [
+                {"id": d["id"], "time": d["time"], "topic": d["topic"], "done": d["done"]}
+                for d in self._data["dailies"]
+            ]
+        return await google_sheets.sync_day(today, items)

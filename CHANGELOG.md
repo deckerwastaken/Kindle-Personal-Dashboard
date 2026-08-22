@@ -1,30 +1,33 @@
-# What's in version 2.1
+# What's in version 2.2
 
 This page is written for someone who has never written a line of code.
 No jargon, or where a technical word is unavoidable, it gets explained.
 
 Version 1 was an early experiment. Version 2 was a complete rebuild, and
 it's the one that actually lives on the Kindle and gets used every day.
-**Version 2.1 adds one thing to the screen lock below: an optional PIN,
-and the ability to lock the screen from your phone** — see "The PIN, and
-locking from your phone" further down. Everything else on this page
-describes what version 2 already did.
+Version 2.1 added an optional screen-lock PIN and the ability to lock the
+screen from your phone. **Version 2.2 adds a whole new screen: Daily, a
+recurring habit checklist** - see "Daily" further down. Everything else
+on this page describes what version 2 (and 2.1) already did.
 
 ---
 
 ## What this thing is
 
 An old Kindle, sitting on a desk, showing a dashboard instead of a book.
-It shows the time, today's tasks, what you're learning, and how much of
-your Claude usage allowance you've spent. You tap the screen to tick
-things off, and you add new things from your phone using Telegram.
+It shows the time, today's tasks, what you're learning, your daily
+habits, and how much of your Claude usage allowance you've spent. You
+tap the screen to tick things off, and you add new things from your
+phone using Telegram.
 
 Two important things about how it works:
 
-- **Nothing goes to the internet or to any company's servers.** The
-  "brain" of this runs on your own laptop. The Kindle just talks to your
-  laptop over your home WiFi. If your laptop is off, the Kindle simply
-  says `OFFLINE` and waits.
+- **Nothing goes to the internet or to any company's servers**, with one
+  optional exception you have to turn on yourself: daily-habit history
+  can sync to a Google Sheet you own, if you set that up (see "Daily"
+  below). Skip it, and the "brain" of this runs entirely on your own
+  laptop. The Kindle just talks to your laptop over your home WiFi. If
+  your laptop is off, the Kindle simply says `OFFLINE` and waits.
 - **Your Kindle is still a Kindle.** The dashboard only runs when you
   start it, and stopping it gives you your normal reading device back.
   You are not giving up your e-reader to get a dashboard.
@@ -44,7 +47,7 @@ The main screen.
   your eye before the Kindle dies on you.
 - **A connection light** that says `ONLINE`, `OFFLINE` or `CONNECTING`,
   so you always know whether what you're looking at is up to date.
-- **Your task list**, four at a time. Tap a task to tick it off — ticked
+- **Your task list**, four at a time. Tap a task to tick it off - ticked
   tasks drop to the bottom of the list instead of vanishing, so you can
   see what you got done.
 - **A "+ Add Task" button**, which brings up a keyboard on the screen.
@@ -60,21 +63,50 @@ A second screen, reached by tapping "Learning" at the bottom.
 
 It tracks two kinds of thing, each with a progress bar:
 
-- **Courses** — you tell it you're 40% through, it shows 40%.
-- **Books** — you tell it you're on page 120 of 300, and it works the
+- **Courses** - you tell it you're 40% through, it shows 40%.
+- **Books** - you tell it you're on page 120 of 300, and it works the
   percentage out for you.
 
 This screen is deliberately **read-only**: you look at it, you don't edit
-it. The reason is honest and simple — changing any of these numbers
+it. The reason is honest and simple - changing any of these numbers
 requires typing a *number*, and the Kindle's on-screen keyboard has
 letters only, no digits at all. Rather than pretend, all changes are made
 from Telegram on your phone, where you have a real keyboard.
 
-### Habits and Home
+### Daily (new in 2.2)
 
-Two more tabs are visible at the bottom but aren't built yet. They're
-greyed out and say "coming soon" if you tap them, rather than looking
-broken.
+A third screen, reached by tapping "Daily" at the bottom - a recurring
+checklist for things you want to do *every day*, laid out like a
+calendar day view: a time, a name, and a checkbox, always in time order
+from earliest to latest.
+
+- **Tap a habit to tick it off, right on the Kindle** - this one's
+  different from Learning: no phone needed for the everyday part.
+  Ticked-off items don't jump to the bottom like your tasks do, though -
+  they stay in their time slot, since the point of this screen is
+  seeing what your whole day looks like, not a shrinking to-do list.
+- **Delete works the same two-tap way as your task list**: tap the "x"
+  once to arm it, tap it again within a few seconds to confirm.
+- **Adding a new habit is done from Telegram**, the same reason as
+  Learning - you need to type a time, and the Kindle's on-screen
+  keyboard has no number keys. Send `/daily 7:00 AM Meditate` (or
+  24-hour style, `/daily 19:00 Dinner prep` - it converts either way to
+  the same 12-hour display).
+- **Every day at midnight, all the checkmarks clear** and a new day
+  starts - but the list of habits itself stays exactly as you built it,
+  forever, until you delete something.
+- **Optional: a running history in a Google Sheet you own.** If you
+  want to look back at streaks over weeks or months, there's an
+  entirely optional setup (`docs/GOOGLE_SHEETS_SETUP.md`, no coding
+  needed, about 10–15 minutes) that copies each day's results into a
+  spreadsheet automatically. Skip it and nothing else changes - the
+  Daily screen works exactly the same either way, this is purely for
+  people who want the extra history.
+
+### Home
+
+One more tab is visible at the bottom but isn't built yet. It's greyed
+out and says "coming soon" if you tap it, rather than looking broken.
 
 ---
 
@@ -84,7 +116,7 @@ Shows how much of your current Claude session allowance you've used, as a
 percentage and a bar, plus when it resets.
 
 **Tap anywhere on that card to refresh it.** The whole card is the
-button — the label, the number, the bar, all of it — not just the small
+button - the label, the number, the bar, all of it - not just the small
 circular arrow in the corner. (It used to be only that little icon, which
 was fiddly to hit accurately on a touchscreen this old.)
 
@@ -109,15 +141,19 @@ send appears on the Kindle within a second, without touching the Kindle.
 | `/percent L1 40` | Sets that course to 40% |
 | `/page L1 120` | Records that you're on page 120 |
 | `/total L1 400` | Corrects a book's page count |
-| `/setpin 1234` | Sets (or changes) the screen-lock PIN — `/setpin off` removes it |
+| `/daily 7:00 AM Meditate` | Adds a daily habit - 24-hour times work too, e.g. `/daily 19:00 Dinner prep` |
+| `/dailyhistory` | Shows the last 7 days for each daily habit |
+| `/dailysync` | Forces an immediate push to Google Sheets, if you've set that up |
+| `/setpin 1234` | Sets (or changes) the screen-lock PIN - `/setpin off` removes it |
 | `/lock` | Locks the Kindle's screen right now |
 | `/help` | Lists all of the above |
 
 Tasks are plain numbers (`3`); courses and books get an **L** in front
-(`L1`, `L2`). `/list` shows you which is which. That distinction isn't
-fussiness — `/done` and `/delete` work on both lists, so without it,
-deleting task 3 on a day when you have no task 3 could have deleted your
-learning item 3 instead.
+(`L1`, `L2`); daily habits get a **D** (`D1`, `D2`). `/list` shows you
+which is which. That distinction isn't fussiness - `/done` and `/delete`
+work across all three lists, so without it, deleting task 3 on a day
+when you have no task 3 could have deleted your learning item 3 or your
+daily habit 3 instead.
 
 ---
 
@@ -133,7 +169,7 @@ nothing is wrong and one button press brings it back.
 
 **It also locks itself after 15 minutes** if nobody touches it, to save
 battery. You can change that time, or switch it off entirely, with one
-setting (`auto_lock_idle_ms` — the setup guide shows you where).
+setting (`auto_lock_idle_ms` - the setup guide shows you where).
 
 While it's locked, the Kindle stops doing almost everything: no clock
 updates, no battery checks, no screen refreshes, and taps are ignored so a
@@ -145,19 +181,19 @@ Two small additions on top of the lock above, both optional:
 
 - **A 4-digit PIN.** Send the bot `/setpin 1234` (any 4 digits you like)
   and pressing the power button to unlock no longer brings the dashboard
-  straight back — it shows a small number pad on the screen first, and
+  straight back - it shows a small number pad on the screen first, and
   only the right 4 digits actually unlock it. Get it wrong and it just
   clears and lets you try again, no penalty. Send `/setpin off` any time
   to remove it and go back to instant unlocking.
 
   The number pad exists because the dashboard's regular on-screen
-  keyboard (used for adding tasks) only has letters, no digits — the same
+  keyboard (used for adding tasks) only has letters, no digits - the same
   reason learning progress is only editable from Telegram. The PIN is
   checked entirely on the Kindle itself, so it still works even if your
   laptop or WiFi happens to be down at the time.
 
 - **`/lock` from Telegram.** Send it and the Kindle locks right now,
-  wherever you are — same lock, same PIN if you've set one, as pressing
+  wherever you are - same lock, same PIN if you've set one, as pressing
   the power button yourself. Handy if you walked away and want to be sure
   it's not sitting unlocked.
 
@@ -175,16 +211,23 @@ until you touch it.
 
 ## Getting out of trouble
 
-Two buttons sit at the bottom of the Today screen for when something goes
-wrong. Both exist because of a real problem hit during building: it used
-to be possible to get into a state where you needed the laptop to fix the
-Kindle, but the Kindle was the thing that had stopped listening to the
-laptop.
+Two buttons sit at the bottom of the Today screen. Exit Dashboard exists
+because of a real problem hit during building: it used to be possible to
+get into a state where you needed the laptop to fix the Kindle, but the
+Kindle was the thing that had stopped listening to the laptop.
 
-- **Exit Dashboard** — asks you to confirm, then restarts the Kindle back
+- **Exit Dashboard** - asks you to confirm, then restarts the Kindle back
   into normal reading mode.
-- **Restart SSH** — turns the Kindle's remote-connection service back on,
-  so your laptop can reach it again.
+- **Network Info** - shows a popup with the Kindle's current wifi
+  network name, IP address, gateway, and a few other connection details,
+  for the times you need to SSH in and don't already know the current
+  address (it changes). Disappears on its own after 10 seconds, or tap
+  outside the popup to close it right away. (Version 2.2 replaces the
+  old "Restart SSH" button here - dropbear, the Kindle's SSH server, has
+  proven reliable enough not to need a manual restart from this screen,
+  and since the Kindle reconnects to a previously-used wifi network on
+  its own when you switch networks, checking the current address is what
+  this spot actually gets used for.)
 
 Day to day you don't need either. Starting and stopping the dashboard is
 two double-clickable files on the laptop: `Start_Dashboard.bat` and
@@ -212,7 +255,7 @@ something you can rely on and something you can't:
   instead of hammering the network.
 - **It tells you when it has lost touch with your laptop.** There's a
   situation where the link between the two dies without either side being
-  told — most often when your router hands the laptop a different address
+  told - most often when your router hands the laptop a different address
   while the dashboard is running. The Kindle used to carry on as if
   nothing had happened: still showing ONLINE, still accepting taps, and
   quietly throwing every one of them away. Now it checks in with the
@@ -221,8 +264,8 @@ something you can rely on and something you can't:
 - **And then it finds your laptop again by itself.** Your laptop quietly
   announces its address on your home network every few seconds, and the
   Kindle listens for that. So when the router changes your laptop's
-  address — moving house, a new router, or just your laptop reconnecting
-  to WiFi — the dashboard notices within about a minute and a half,
+  address - moving house, a new router, or just your laptop reconnecting
+  to WiFi - the dashboard notices within about a minute and a half,
   re-finds the laptop within a second, and carries on. No restarting
   anything. This used to be the one failure you had to fix by hand.
 
@@ -232,10 +275,10 @@ something you can rely on and something you can't:
   device on your home network could imitate one and point the dashboard
   somewhere else. The Kindle refuses any address outside your own home
   network, and nothing else in this project is password-protected either
-  — but it's your network and your call.
+  - but it's your network and your call.
 - **The dashboard stays responsive while it's trying to reconnect.** A
   long-standing bug meant that whenever the Kindle tried to reach a laptop
-  that wasn't there, the whole dashboard froze for the duration — taps,
+  that wasn't there, the whole dashboard froze for the duration - taps,
   the power button, the clock, everything. Fixed.
 - **Your tasks survive a crash.** If the file holding them is ever
   damaged, it's kept as a backup copy rather than thrown away.

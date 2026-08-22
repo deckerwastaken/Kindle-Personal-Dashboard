@@ -16,12 +16,18 @@ Commands:
       /page <id> <page>      - set what page you're on in a book
       /total <id> <pages>    - correct a book's total page count
       /done, /delete         - also accept a learning id (L3)
+    Daily habits
+      /daily <time> <topic>  - add a recurring daily item (D3)
+                                e.g. /daily 7:00 AM Meditate
+      /done, /delete         - also accept a daily id (D3)
+      /dailyhistory           - last 7 days, per habit
+      /dailysync               - force a push to Google Sheets now
     Lock
       /setpin <4 digits>      - set (or change) the screen-lock PIN
       /setpin off             - remove the PIN
       /lock                   - lock the Kindle's screen right now
     Both
-      /list                  - show tasks and learning
+      /list                  - show tasks, daily habits, and learning
       /help, /start          - show help text
 
 WHY TELEGRAM CARRIES THE WHOLE LEARNING FEATURE
@@ -62,16 +68,19 @@ Two decisions worth stating once, since they shape every handler below:
    back, so the mistake is visible in the same second, and /total repairs
    it in one command. That is the entire reason /total is in v1.
 
-2. Learning ids are shown as "L3", tasks as "#3". They are separate
-   sequences, so a bare "/done 3" is genuinely ambiguous -- it resolves
-   against TASKS first (the older, higher-frequency surface), then
-   learnings. Writing "/done L3" is unambiguous and always means the
-   learning. Every reply restates the full prefixed id, which teaches the
+2. Learning ids are shown as "L3", tasks as "#3", daily habits as "D3".
+   They are three separate sequences, so a bare "/done 3" is genuinely
+   ambiguous -- it resolves against TASKS first (the oldest,
+   highest-frequency surface), then learnings, then daily habits.
+   Writing "/done L3" or "/done D3" is unambiguous and always means that
+   one list. Every reply restates the full prefixed id, which teaches the
    namespace without anyone reading documentation.
 """
 
 import asyncio
 import logging
+import re
+from datetime import date, timedelta
 
 import httpx
 
@@ -101,6 +110,13 @@ HELP_TEXT = (
     "/total <id> <pages> - fix a page count\n"
     "   e.g. /total L1 300\n"
     "\n"
+    "DAILY HABITS\n"
+    "/daily <time> <topic> - add a recurring item\n"
+    "   e.g. /daily 7:00 AM Meditate\n"
+    "   24h also works: /daily 19:00 Dinner prep\n"
+    "/dailyhistory - last 7 days, per habit\n"
+    "/dailysync - force a push to Google Sheets\n"
+    "\n"
     "LOCK\n"
     "/setpin <4 digits> - set/change the lock PIN\n"
     "   e.g. /setpin 1234\n"
@@ -111,9 +127,11 @@ HELP_TEXT = (
     "/list - show everything\n"
     "/help - this message\n"
     "\n"
-    "Tasks are #1 #2. Learning is L1 L2.\n"
-    "/done and /delete take either one.\n"
-    "Books finish themselves at the last page."
+    "Tasks are #1 #2. Learning is L1 L2. Daily habits are D1 D2.\n"
+    "/done and /delete take any of the three.\n"
+    "Books finish themselves at the last page.\n"
+    "Daily habits reset unchecked every midnight -- toggle and\n"
+    "delete them right on the Kindle, add new ones here."
 )
 
 # Registered with Telegram at startup so the app shows a tap-to-fill menu
@@ -132,6 +150,9 @@ BOT_COMMANDS = [
     {"command": "percent", "description": "Set course progress: /percent L1 40"},
     {"command": "page", "description": "Set book page: /page L1 120"},
     {"command": "total", "description": "Fix a book's page count"},
+    {"command": "daily", "description": "Add a daily habit: /daily 7:00 AM Meditate"},
+    {"command": "dailyhistory", "description": "Show the last 7 days per daily habit"},
+    {"command": "dailysync", "description": "Force a push to Google Sheets now"},
     {"command": "setpin", "description": "Set/remove the screen-lock PIN: /setpin 1234"},
     {"command": "lock", "description": "Lock the Kindle's screen now"},
     {"command": "help", "description": "Show all commands"},
@@ -214,20 +235,22 @@ def _split_command(text: str) -> tuple:
 def _parse_id(token: str) -> tuple:
     """Parses an id and how explicitly the user named which list it's in.
 
-    Returns (id, kind) where kind is "learning", "task", or None:
+    Returns (id, kind) where kind is "learning", "task", "daily", or None:
 
         "L3" / "l3"  -> (3, "learning")
         "#3"         -> (3, "task")
+        "D3" / "d3"  -> (3, "daily")
         "3"          -> (3, None)      -- ambiguous, resolve tasks-first
         "x" / ""     -> (None, ...)
 
-    Both prefixes are equally explicit, and treating them that way
-    matters for /done and /delete, which span both lists. /list prints
-    task ids as "#1", so "#3" is the format the user is being SHOWN --
-    if it were treated as ambiguous, then "/delete #3" at a moment when
-    task 3 no longer exists (already deleted, or done and cleared) would
-    fall through and permanently delete learning L3 instead. An explicit
-    prefix means "only look in this list", in both directions.
+    All three prefixes are equally explicit, and treating them that way
+    matters for /done and /delete, which span all three lists. /list
+    prints task ids as "#1", so "#3" is the format the user is being
+    SHOWN -- if it were treated as ambiguous, then "/delete #3" at a
+    moment when task 3 no longer exists (already deleted, or done and
+    cleared) would fall through and permanently delete learning L3 or
+    daily D3 instead. An explicit prefix means "only look in this list",
+    in every direction.
     """
     token = token.strip()
     kind = None
@@ -237,10 +260,95 @@ def _parse_id(token: str) -> tuple:
     elif token[:1] == "#":
         kind = "task"
         token = token[1:]
+    elif token[:1] in ("D", "d"):
+        kind = "daily"
+        token = token[1:]
     try:
         return int(token), kind
     except ValueError:
         return None, kind
+
+
+_DAILY_TIME_RE_12H = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s+(\S.*)$")
+_DAILY_TIME_RE_24H = re.compile(r"^\s*(\d{1,2}):(\d{2})\s+(\S.*)$")
+
+
+def _parse_daily_time(rest: str) -> "tuple | None":
+    """('7:00 AM Meditate') -> (420, '7:00 AM', 'Meditate')
+    ('19:00 Dinner prep')   -> (1140, '7:00 PM', 'Dinner prep')
+    ('12:00 AM Lights out') -> (0, '12:00 AM', 'Lights out')   -- midnight
+    ('12:00 PM Lunch')      -> (720, '12:00 PM', 'Lunch')       -- noon
+
+    Accepts either 12-hour input (with AM/PM) or bare 24-hour input, and
+    always normalizes the OUTPUT to a 12-hour "7:00 AM"-style display
+    string -- that string is computed exactly once, here, and then just
+    displayed verbatim everywhere else (this bot's own replies, and the
+    Kindle's on-screen render), so there is exactly one place
+    time-formatting rules live. `minutes` (0-1439, minutes since local
+    midnight) is the sort key state.py's snapshot()/list_dailies() use.
+
+    Two separate regexes, tried 12h-first, rather than one regex with an
+    OPTIONAL "AM"/"PM" group: an optional group there is free to backtrack
+    itself away entirely, which let "/daily 7:00 AM" (a truncated attempt
+    with no real topic typed yet) silently match anyway -- the "AM" token
+    got reinterpreted as bare 24-hour-mode TOPIC text instead of causing a
+    rejection, quietly adding a habit literally named "AM". Requiring
+    AM/PM to be non-optional in its own regex removes that backtrack path;
+    the bare trailing-"am"/"pm" guard below closes the identical gap for
+    the 24h regex, which has no way to know "AM" was meant as a marker
+    rather than a genuine (if odd) topic.
+
+    Returns None if the input doesn't match the expected shape, no topic
+    is present, or the hour/minute values are out of range for whichever
+    mode (12h vs 24h) was detected.
+    """
+    m = _DAILY_TIME_RE_12H.match(rest)
+    if m:
+        hour, minute, ampm, topic = m.groups()
+    else:
+        m = _DAILY_TIME_RE_24H.match(rest)
+        if not m:
+            return None
+        hour, minute, topic = m.groups()
+        ampm = None
+        if topic.strip().lower() in ("am", "pm"):
+            # Almost certainly a truncated 12-hour attempt missing its
+            # topic ("/daily 7:00 AM" with nothing typed after it yet),
+            # not someone genuinely naming a habit "am"/"pm" -- refuse
+            # rather than silently adding a habit with that as its topic.
+            return None
+
+    hour = int(hour)
+    minute = int(minute)
+    if minute < 0 or minute > 59:
+        return None
+    topic = topic.strip()
+
+    if ampm:
+        if hour < 1 or hour > 12:
+            return None
+        ampm = ampm.upper()
+        if ampm == "AM":
+            hour24 = 0 if hour == 12 else hour
+        else:
+            hour24 = 12 if hour == 12 else hour + 12
+        display = f"{hour}:{minute:02d} {ampm}"
+    else:
+        if hour < 0 or hour > 23:
+            return None
+        hour24 = hour
+        if hour24 == 0:
+            display_hour, ampm_disp = 12, "AM"
+        elif hour24 < 12:
+            display_hour, ampm_disp = hour24, "AM"
+        elif hour24 == 12:
+            display_hour, ampm_disp = 12, "PM"
+        else:
+            display_hour, ampm_disp = hour24 - 12, "PM"
+        display = f"{display_hour}:{minute:02d} {ampm_disp}"
+
+    minutes_since_midnight = hour24 * 60 + minute
+    return minutes_since_midnight, display, topic
 
 
 def _parse_percent(token: str) -> "int | None":
@@ -488,67 +596,127 @@ async def _cmd_total(state: StateStore, client: httpx.AsyncClient, rest: str) ->
         )
 
 
+async def _cmd_daily(state: StateStore, client: httpx.AsyncClient, rest: str) -> None:
+    if not rest:
+        await send_message(
+            client,
+            "Usage: /daily <time> <topic>\ne.g. /daily 7:00 AM Meditate\n"
+            "24h works too: /daily 19:00 Dinner prep",
+        )
+        return
+    parsed = _parse_daily_time(rest)
+    if parsed is None:
+        await send_message(
+            client,
+            "Couldn't read that time. Usage: /daily <time> <topic>\n"
+            "e.g. /daily 7:00 AM Meditate, or /daily 19:00 Dinner prep",
+        )
+        return
+    minutes, display, topic = parsed
+    item = await state.add_daily(minutes, display, topic)
+    await send_message(client, f"Added daily D{item['id']} {item['time']}: {item['topic']}")
+
+
+_NOT_FOUND_ANY = "No task #{id}, learning L{id}, or daily D{id} found."
+
+
 async def _cmd_done(state: StateStore, client: httpx.AsyncClient, rest: str) -> None:
     if not rest:
-        await send_message(client, "Usage: /done <#>\ne.g. /done 3, or /done L1 for learning")
+        await send_message(client, "Usage: /done <#>\ne.g. /done 3, /done L1, or /done D1")
         return
     item_id, kind = _parse_id(rest.split()[0])
     if item_id is None:
-        await send_message(client, "Usage: /done <#>\ne.g. /done 3, or /done L1 for learning")
+        await send_message(client, "Usage: /done <#>\ne.g. /done 3, /done L1, or /done D1")
         return
 
-    # A bare number resolves against tasks first: that's the surface the
-    # user has been typing "/done 3" at for months, so it should keep
-    # meaning what it always meant. An explicit prefix ("L3" or "#3")
-    # confines the lookup to that one list -- so a mistyped or
-    # already-gone id reports "not found" instead of quietly acting on
-    # the same number in the OTHER list.
-    if kind != "learning":
+    # A bare number resolves tasks -> learning -> daily, in that order:
+    # tasks are the oldest, highest-frequency surface, so a bare "/done 3"
+    # should keep meaning what it always meant. An explicit prefix ("#3",
+    # "L3", "D3") confines the lookup to exactly that one list -- so a
+    # mistyped or already-gone id reports "not found" instead of quietly
+    # acting on the same number in one of the OTHER two lists.
+    if kind is None:
         if await state.mark_done(item_id):
             await send_message(client, f"Marked #{item_id} done.")
             return
+        updated = await state.mark_learning_done(item_id)
+        if updated is not None:
+            await send_message(
+                client, f"Finished {_fmt_learning(updated)}. /delete L{item_id} to remove it."
+            )
+            return
+        daily = await state.mark_daily_done(item_id)
+        if daily is not None:
+            await send_message(client, f"Marked D{item_id} done: {daily['topic']}")
+            return
+        await send_message(client, _NOT_FOUND_ANY.format(id=item_id))
+        return
+
     if kind == "task":
-        await send_message(client, f"No task #{item_id} found.")
+        if await state.mark_done(item_id):
+            await send_message(client, f"Marked #{item_id} done.")
+        else:
+            await send_message(client, f"No task #{item_id} found.")
+        return
+
+    if kind == "daily":
+        daily = await state.mark_daily_done(item_id)
+        if daily is not None:
+            await send_message(client, f"Marked D{item_id} done: {daily['topic']}")
+        else:
+            await send_message(client, f"No daily D{item_id} found.")
         return
 
     updated = await state.mark_learning_done(item_id)
     if updated is None:
-        if kind == "learning":
-            await send_message(client, f"No learning L{item_id} found.")
-        else:
-            await send_message(client, f"No task #{item_id} or learning L{item_id} found.")
+        await send_message(client, f"No learning L{item_id} found.")
         return
     await send_message(client, f"Finished {_fmt_learning(updated)}. /delete L{item_id} to remove it.")
 
 
 async def _cmd_delete(state: StateStore, client: httpx.AsyncClient, rest: str) -> None:
     if not rest:
-        await send_message(client, "Usage: /delete <#>\ne.g. /delete 3, or /delete L1")
+        await send_message(client, "Usage: /delete <#>\ne.g. /delete 3, /delete L1, or /delete D1")
         return
     item_id, kind = _parse_id(rest.split()[0])
     if item_id is None:
-        await send_message(client, "Usage: /delete <#>\ne.g. /delete 3, or /delete L1")
+        await send_message(client, "Usage: /delete <#>\ne.g. /delete 3, /delete L1, or /delete D1")
         return
 
     # Same explicit-prefix rule as /done above, and it matters most here:
     # deletion is the one irreversible action in this bot, so "#3" must
-    # never be able to reach a learning.
-    if kind != "learning":
+    # never be able to reach a learning or a daily habit.
+    if kind is None:
         if await state.delete_task(item_id):
             await send_message(client, f"Deleted #{item_id}.")
             return
+        if await state.delete_learning(item_id):
+            await send_message(client, f"Deleted L{item_id}.")
+            return
+        if await state.delete_daily(item_id):
+            await send_message(client, f"Deleted D{item_id}.")
+            return
+        await send_message(client, _NOT_FOUND_ANY.format(id=item_id))
+        return
+
     if kind == "task":
-        await send_message(client, f"No task #{item_id} found.")
+        if await state.delete_task(item_id):
+            await send_message(client, f"Deleted #{item_id}.")
+        else:
+            await send_message(client, f"No task #{item_id} found.")
+        return
+
+    if kind == "daily":
+        if await state.delete_daily(item_id):
+            await send_message(client, f"Deleted D{item_id}.")
+        else:
+            await send_message(client, f"No daily D{item_id} found.")
         return
 
     if await state.delete_learning(item_id):
         await send_message(client, f"Deleted L{item_id}.")
-        return
-
-    if kind == "learning":
-        await send_message(client, f"No learning L{item_id} found.")
     else:
-        await send_message(client, f"No task #{item_id} or learning L{item_id} found.")
+        await send_message(client, f"No learning L{item_id} found.")
 
 
 async def _cmd_setpin(state: StateStore, client: httpx.AsyncClient, rest: str) -> None:
@@ -585,11 +753,16 @@ async def _cmd_lock(client: httpx.AsyncClient, manager: ConnectionManager) -> No
 
 
 async def _cmd_list(state: StateStore, client: httpx.AsyncClient) -> None:
-    """Shows BOTH lists. /list means 'show me my stuff', not 'show me the
-    tasks collection' -- and a separate /learnlist would be one more name
-    to remember for no extra information. Empty sections print a hint
-    rather than disappearing: hiding a section hides the feature."""
+    """Shows all three lists. /list means 'show me my stuff', not 'show me
+    the tasks collection' -- and separate /dailylist or /learnlist
+    commands would be one more name each to remember for no extra
+    information. Empty sections print a hint rather than disappearing:
+    hiding a section hides the feature.
+
+    Order is TASKS, DAILY, LEARNING -- the two checkable, tap-to-toggle
+    lists sit together, with the read-only learning list last."""
     tasks = await state.list_tasks()
+    dailies = await state.list_dailies()
     learnings = await state.list_learnings()
 
     lines = ["TASKS"]
@@ -599,6 +772,19 @@ async def _cmd_list(state: StateStore, client: httpx.AsyncClient) -> None:
         for t in tasks:
             mark = "DONE" if t["done"] else "TODO"
             lines.append(f"[{mark}] #{t['id']}: {t['text']}")
+
+    lines.append("")
+    lines.append("DAILY")
+    if not dailies:
+        lines.append("(nothing yet - /daily <time> <topic> to start)")
+    else:
+        # list_dailies() is already time-sorted -- deliberately NOT
+        # partitioning done to the bottom here, unlike tasks/learning
+        # below: a daily habit is modeled on a calendar day view, so it
+        # stays in its time slot regardless of done state.
+        for d in dailies:
+            mark = "DONE" if d["done"] else "TODO"
+            lines.append(f"[{mark}] D{d['id']} {d['time']}: {d['topic']}")
 
     lines.append("")
     lines.append("LEARNING")
@@ -614,6 +800,72 @@ async def _cmd_list(state: StateStore, client: httpx.AsyncClient) -> None:
             lines.append(f"[{mark}] L{item['id']}: {item['name']}{suffix}")
 
     await send_message(client, "\n".join(lines))
+
+
+_HISTORY_LEGEND = "v done   x missed   - no data   ... today (in progress)"
+
+
+async def _cmd_dailyhistory(state: StateStore, client: httpx.AsyncClient) -> None:
+    """Last 7 calendar days, one line per daily habit, oldest to newest.
+
+    An ABSENT date key in daily_history means "no data recorded" (the
+    backend wasn't running at that midnight) and must render distinctly
+    from a PRESENT key mapping a habit to False (a real day where it was
+    genuinely missed) -- see state.py's maybe_reset_dailies for why that
+    distinction exists. Today is never looked up in daily_history at all
+    (it isn't archived until the NEXT midnight), so it always shows the
+    "in progress" marker rather than being confused with either case.
+    """
+    dailies = await state.list_dailies()
+    if not dailies:
+        await send_message(client, "No daily habits yet - /daily <time> <topic> to add one.")
+        return
+    history = await state.get_daily_history()
+    today = date.today()
+    days = [today - timedelta(days=offset) for offset in range(6, -1, -1)]
+
+    lines = ["DAILY HISTORY (last 7 days)"]
+    for d in dailies:
+        key = str(d["id"])
+        markers = []
+        for day in days:
+            if day == today:
+                markers.append("...")
+                continue
+            day_record = history.get(day.isoformat())
+            if day_record is None:
+                markers.append("-")
+            elif day_record.get(key) is True:
+                markers.append("v")
+            elif day_record.get(key) is False:
+                markers.append("x")
+            else:
+                # This date WAS recorded, but the habit didn't exist yet
+                # (added after that day) -- also "no data", not a miss.
+                markers.append("-")
+        lines.append(f"D{d['id']} {d['topic']}: {' '.join(markers)}")
+
+    lines.append("")
+    lines.append(_HISTORY_LEGEND)
+    await send_message(client, "\n".join(lines))
+
+
+async def _cmd_dailysync(state: StateStore, client: httpx.AsyncClient) -> None:
+    """Forces an AWAITED push of today's daily-habit state to Google
+    Sheets right now, unlike the silent fire-and-forget sync that runs
+    after every add/toggle/delete -- mainly for confirming a fresh Sheets
+    setup actually works, with a real success/failure reply."""
+    if not config.HAS_GOOGLE_SHEETS:
+        await send_message(
+            client,
+            "Google Sheets isn't configured yet -- see docs/GOOGLE_SHEETS_SETUP.md.",
+        )
+        return
+    ok, message = await state.force_daily_sync()
+    if ok:
+        await send_message(client, f"Synced today's daily habits to Google Sheets. {message}")
+    else:
+        await send_message(client, f"Sync failed: {message}")
 
 
 async def process_command(
@@ -651,6 +903,15 @@ async def process_command(
 
     elif cmd == "/total":
         await _cmd_total(state, client, rest)
+
+    elif cmd == "/daily":
+        await _cmd_daily(state, client, rest)
+
+    elif cmd == "/dailyhistory":
+        await _cmd_dailyhistory(state, client)
+
+    elif cmd == "/dailysync":
+        await _cmd_dailysync(state, client)
 
     elif cmd == "/setpin":
         await _cmd_setpin(state, client, rest)

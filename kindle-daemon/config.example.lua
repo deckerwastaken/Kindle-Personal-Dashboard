@@ -34,6 +34,31 @@ return {
     -- under /mnt/us/extensions/koreader/ instead of /mnt/us/koreader/).
     fbink_path = "/mnt/us/koreader/fbink",
 
+    -- OPTIONAL: path to a SECOND fbink binary that actually has image
+    -- (PNG/JPEG) support compiled in, used only to show a picture on the
+    -- lock screen instead of the plain "Locked" text. The binary above
+    -- (fbink_path) is a MINIMAL build bundled with KOReader -- run
+    -- `fbink --help` on the device and check for `Image=No` in the
+    -- banner to confirm -- so it can't blit images at all, and every
+    -- other screen in this project is calibrated against its exact
+    -- current behavior, which is why this isn't just a second value for
+    -- fbink_path itself. See kindle-daemon/ops/FBINK_IMAGE_UPGRADE.md for
+    -- how to get one and where to put it. Leave as nil to keep the
+    -- lock screen as plain text (the default, and also what you get
+    -- automatically if this file or the image below is missing).
+    fbink_image_path = nil,
+
+    -- OPTIONAL: array of absolute paths (ON THE KINDLE) to the PNGs to
+    -- show on the lock screen, e.g. "/mnt/us/kindle-daemon/assets/lock_screen.png"
+    -- -- copy kindle-daemon/assets/*.png there. One is picked at random
+    -- each time the screen locks, so with more than one entry you get a
+    -- rotation rather than always the same picture. Only takes effect if
+    -- fbink_image_path above is also set; entries that don't actually
+    -- exist on the device are silently skipped (checked fresh on every
+    -- lock, not just at startup) -- an empty list (or leaving this nil)
+    -- falls back to the plain "Locked" text.
+    lock_screen_image_paths = nil,
+
     -- Touch input device node. Leave as nil to auto-detect (recommended
     -- first try -- see src/touch.lua and tools/evtest.lua). If
     -- auto-detect picks the wrong /dev/input/eventN, hardcode the right
@@ -134,52 +159,4 @@ return {
     -- Touch and power-button latency do NOT depend on this: poll() wakes
     -- the instant an event arrives, whatever the timeout was set to.
     poll_timeout_ms = 500,
-
-    -- Shell command run by the on-screen "Restart SSH" button (see
-    -- README.md/INSTALL.md) when it detects dropbear (KOReader's bundled
-    -- SSH server) is NOT currently running. This exists so a lost SSH
-    -- session can be recovered from entirely on-device, without the
-    -- previous chicken-and-egg problem of "you need SSH to stop the
-    -- dashboard, but stopping it is what you'd do to get SSH back".
-    --
-    -- CONFIRMED ON HARDWARE (2026-08-02, live SSH session): this is not
-    -- a guess -- it's copied directly from KOReader's own installed
-    -- SSH.koplugin/main.lua (its SSH:start() function), which is the
-    -- exact command KOReader's own "SSH server" menu toggle runs on this
-    -- device. Read directly off the device rather than inferred:
-    --   - `/mnt/us/koreader/dropbear` is the confirmed binary path.
-    --   - `-E` logs to stderr, `-R` auto-creates host keys if missing (a
-    --     key already exists at
-    --     koreader/settings/SSH/dropbear_ed25519_host_key on this
-    --     device), `-p 2222` matches the port this project's docs
-    --     already assume (INSTALL.md), `-P /tmp/dropbear_koreader.pid`
-    --     is the same pidfile path KOReader's own plugin uses (not
-    --     required for this button's own "is it running" check, which
-    --     does a real `ps`/`grep` process check instead -- see
-    --     src/daemon.lua's is_dropbear_running() -- but kept here so a
-    --     dropbear started this way looks identical to one KOReader
-    --     itself started, in case anything else ever inspects that
-    --     pidfile), `-s` disables password auth (key-only login, which
-    --     this device's authorized_keys-based setup already assumes).
-    --   - dropbear reads authorized_keys from `settings/SSH/authorized_keys`
-    --     relative to its working directory -- the `cd /mnt/us/koreader &&`
-    --     before it is what makes that resolve to the same
-    --     koreader/settings/SSH/authorized_keys path INSTALL.md has you
-    --     set up, no separate configuration needed here.
-    --   - The two `iptables` lines open the same firewall hole
-    --     KOReader's own plugin opens for port 2222 -- without this,
-    --     dropbear would be listening but unreachable from your LAN. The
-    --     `-C ... || -A ...` guard (check-then-add) makes this safe to
-    --     run more than once per boot: `-C` silently succeeds/fails
-    --     without changing anything if the rule already exists, so
-    --     repeated taps of the Restart SSH button don't pile up
-    --     duplicate firewall rules.
-    -- If you ever change the port from 2222, it needs updating in three
-    -- places in the string below (-p, --dport, --sport).
-    ssh_restart_cmd =
-        "cd /mnt/us/koreader && ./dropbear -E -R -p 2222 -P /tmp/dropbear_koreader.pid -s; " ..
-        "iptables -C INPUT -p tcp --dport 2222 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null || " ..
-        "iptables -A INPUT -p tcp --dport 2222 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT; " ..
-        "iptables -C OUTPUT -p tcp --sport 2222 -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null || " ..
-        "iptables -A OUTPUT -p tcp --sport 2222 -m conntrack --ctstate ESTABLISHED -j ACCEPT",
 }

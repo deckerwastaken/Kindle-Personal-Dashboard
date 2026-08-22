@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" width="600" height="800">
+  <title>Kindle Dashboard mockup</title>
+  <rect x="-3" y="-3" width="606" height="806" fill="#1a1a1a"/>
+  <rect x="0" y="0" width="600" height="800" fill="white"/>
+  <text x="24" y="43.68" font-size="22.1" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">DAILY</text>
+  <text x="24" y="77.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">1/3 done today</text>
+  <rect x="536" y="30" width="36" height="20" fill="black"/>
+  <rect x="538" y="32" width="32" height="16" fill="white"/>
+  <rect x="572" y="36" width="4" height="8" fill="black"/>
+  <rect x="538" y="32" width="17" height="16" fill="black"/>
+  <text x="520" y="37.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="end" letter-spacing="0">54%</text>
+  <rect x="24" y="104" width="552" height="2" fill="black"/>
+  <rect x="24" y="130" width="40" height="40" fill="black"/>
+  <text x="30" y="155.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">X</text>
+  <text x="80" y="148.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">7:00 AM</text>
+  <text x="152" y="142.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Meditate  (done)</text>
+  <text x="548" y="149.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">x</text>
+  <rect x="24" y="194" width="40" height="40" fill="black"/>
+  <rect x="30" y="200" width="28" height="28" fill="white"/>
+  <text x="80" y="212.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">8:00 AM</text>
+  <text x="152" y="206.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Stretch</text>
+  <text x="548" y="213.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">x</text>
+  <rect x="24" y="258" width="40" height="40" fill="black"/>
+  <rect x="30" y="264" width="28" height="28" fill="white"/>
+  <text x="80" y="276.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">7:00 PM</text>
+  <text x="152" y="270.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Dinner prep</text>
+  <text x="548" y="277.12" font-size="14.7" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">x</text>
+  <rect x="0" y="736" width="600" height="64" fill="white"/>
+  <rect x="0" y="736" width="600" height="2" fill="black"/>
+  <text x="20" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Today</text>
+  <text x="170" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="black" text-anchor="start" letter-spacing="0">Learning</text>
+  <rect x="300" y="738" width="150" height="62" fill="black"/>
+  <text x="320" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Daily</text>
+  <text x="470" y="762.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="#949494" text-anchor="start" letter-spacing="0">Home</text>
+</svg>

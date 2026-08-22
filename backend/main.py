@@ -13,7 +13,10 @@ Single FastAPI/uvicorn process that:
      another asyncio background task.
   4. Runs the claude.ai session-usage poller (5-min cadence, unofficial
      endpoint -- see claude_session_usage.py) as another background task.
-  5. Persists all state to backend/data/state.json with atomic writes.
+  5. Watches for the local calendar date changing and resets the Daily
+     habits checklist at midnight, archiving the outgoing day (locally,
+     and to Google Sheets if configured -- see daily_reset.py).
+  6. Persists all state to backend/data/state.json with atomic writes.
 
 Run with:
     uvicorn backend.main:app --host 0.0.0.0 --port 8000
@@ -29,7 +32,7 @@ from typing import List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from . import anthropic_usage, claude_session_usage, config, discovery, telegram_bot
+from . import anthropic_usage, claude_session_usage, config, daily_reset, discovery, telegram_bot
 from .state import StateStore
 from .ws_manager import ConnectionManager
 
@@ -70,11 +73,17 @@ async def lifespan(app: FastAPI):
         "Discovery beacon: %s",
         "ENABLED" if config.DISCOVERY_ENABLED else "DISABLED (DISCOVERY_ENABLED=0)",
     )
+    logger.info(
+        "Daily habits -> Google Sheets sync: %s",
+        "ENABLED" if config.HAS_GOOGLE_SHEETS else "DISABLED (no spreadsheet configured -- "
+        "the Daily tab still works fully locally, see docs/GOOGLE_SHEETS_SETUP.md)",
+    )
 
     _background_tasks.append(asyncio.create_task(discovery.beacon_loop(), name="discovery-beacon"))
     _background_tasks.append(asyncio.create_task(telegram_bot.poll_loop(state, manager), name="telegram-poll"))
     _background_tasks.append(asyncio.create_task(anthropic_usage.poll_loop(state), name="anthropic-poll"))
     _background_tasks.append(asyncio.create_task(claude_session_usage.poll_loop(state), name="claude-session-poll"))
+    _background_tasks.append(asyncio.create_task(daily_reset.poll_loop(state), name="daily-reset"))
 
     try:
         yield
@@ -180,6 +189,28 @@ async def _handle_client_message(websocket: WebSocket, raw: str) -> None:
             found = await state.delete_task(task_id)
             if not found:
                 await _safe_send(websocket, {"error": "not_found", "detail": f"No task #{task_id}"})
+
+        elif action == "toggle_daily":
+            # Mirrors toggle_task exactly -- see backend/README.md for why
+            # dailies allow toggle/delete from the Kindle but not add
+            # (adding needs a time, which is a number the on-screen
+            # keyboard can't type).
+            daily_id = msg.get("id")
+            if not isinstance(daily_id, int) or isinstance(daily_id, bool):
+                await _safe_send(websocket, {"error": "bad_request", "detail": "toggle_daily requires integer 'id'"})
+                return
+            new_state = await state.toggle_daily(daily_id)
+            if new_state is None:
+                await _safe_send(websocket, {"error": "not_found", "detail": f"No daily habit D{daily_id}"})
+
+        elif action == "delete_daily":
+            daily_id = msg.get("id")
+            if not isinstance(daily_id, int) or isinstance(daily_id, bool):
+                await _safe_send(websocket, {"error": "bad_request", "detail": "delete_daily requires integer 'id'"})
+                return
+            found = await state.delete_daily(daily_id)
+            if not found:
+                await _safe_send(websocket, {"error": "not_found", "detail": f"No daily habit D{daily_id}"})
 
         elif action == "refresh_usage":
             # On success this doesn't need to reply directly -- set_session_usage()

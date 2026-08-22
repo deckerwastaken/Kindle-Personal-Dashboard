@@ -189,7 +189,7 @@ end
 --- happened to be registered first. Gesture REGIONS are excluded: they
 --- deliberately span the tap targets inside them, which is exactly why
 --- daemon.lua looks them up separately instead of through hit_test().
-local GESTURE_KINDS = { task_swipe_area = true, learning_swipe_area = true }
+local GESTURE_KINDS = { task_swipe_area = true, learning_swipe_area = true, daily_swipe_area = true }
 
 local function check_no_overlap(label, zones)
     local tap = {}
@@ -458,7 +458,7 @@ do
     local joined = table.concat(text_blob, "|")
     check("shows the LEARNING title", joined:find("LEARNING", 1, true) ~= nil)
     for _, forbidden in ipairs({ "TODAY", "CLAUDE USAGE", "Exit Dashboard",
-                                 "Restart SSH", "+ Add Task" }) do
+                                 "Network Info", "+ Add Task" }) do
         check("does not show \"" .. forbidden .. "\"",
             joined:find(forbidden, 1, true) == nil)
     end
@@ -594,6 +594,177 @@ do
         lowest <= L.nav_y, "lowest content bottom " .. lowest .. ", nav bar at " .. L.nav_y)
 end
 
+print("\n=== DAILY habits screen ===")
+
+local function daily_item(id, minutes, time, topic, done)
+    return { id = id, minutes = minutes, time = time, topic = topic, done = done or false }
+end
+
+local function daily_state(items)
+    return { tasks = {}, learnings = {}, dailies = items,
+             session_usage = { percent = 0, resets_label = "" } }
+end
+
+do
+    local items = {
+        daily_item(1, 420, "7:00 AM", "Meditate", true),
+        daily_item(2, 480, "8:00 AM", "Stretch", false),
+        daily_item(3, 1140, "7:00 PM", "Dinner prep", false),
+    }
+    local ops, zones = render(ui.draw_daily, daily_state(items), "open", 1, 78)
+    check_in_bounds("mixed done/not-done daily items", ops)
+    check_zones_sane("mixed done/not-done daily items", zones)
+    check_no_overlap("mixed done/not-done daily items", zones)
+
+    -- Shows daily items and nothing borrowed from the dashboard or
+    -- Learning: no task rows, no usage card, no Exit/Restart footer.
+    local text_blob = {}
+    for _, o in ipairs(ops) do
+        if o.op == "text" and o.text then text_blob[#text_blob + 1] = o.text end
+    end
+    local joined = table.concat(text_blob, "|")
+    check("shows the DAILY title", joined:find("DAILY", 1, true) ~= nil)
+    for _, forbidden in ipairs({ "TODAY", "CLAUDE USAGE", "Exit Dashboard",
+                                 "Network Info", "+ Add Task", "LEARNING" }) do
+        check("does not show \"" .. forbidden .. "\"",
+            joined:find(forbidden, 1, true) == nil)
+    end
+
+    -- UNLIKE Learning, this screen is NOT read-only: toggle and delete
+    -- zones must exist, one pair per item.
+    local kinds = {}
+    for _, z in ipairs(zones) do kinds[z.kind] = (kinds[z.kind] or 0) + 1 end
+    check_eq("one toggle_daily zone per item", kinds.toggle_daily, #items)
+    check_eq("one delete_daily_zone per item", kinds.delete_daily_zone, #items)
+    check("nav bar is present", kinds.nav_tab == 4)
+end
+
+do
+    -- The defining rule of this screen: items stay in FIXED chronological
+    -- order regardless of done state -- unlike every other list in this
+    -- app, a finished item does NOT sink to the bottom (see
+    -- draw_daily_row's own comment). Verified by checking the TIME
+    -- column's text draws come out in the same order the items were
+    -- given, done or not.
+    local items = {
+        daily_item(1, 420, "7:00 AM", "Meditate", true),
+        daily_item(2, 480, "8:00 AM", "Stretch", false),
+        daily_item(3, 540, "9:00 AM", "Journal", true),
+    }
+    local ops = render(ui.draw_daily, daily_state(items), "open", 1, 78)
+    local times_seen = {}
+    for _, o in ipairs(ops) do
+        if o.op == "text" and (o.text == "7:00 AM" or o.text == "8:00 AM" or o.text == "9:00 AM") then
+            times_seen[#times_seen + 1] = o.text
+        end
+    end
+    check_eq("daily items keep chronological order regardless of done state",
+        table.concat(times_seen, ","), "7:00 AM,8:00 AM,9:00 AM")
+end
+
+do
+    -- A finished item's topic gets " (done)" appended, same convention
+    -- the Today task list already uses -- not a strikethrough or a moved
+    -- row, since this list never reorders.
+    local items = { daily_item(1, 420, "7:00 AM", "Meditate", true) }
+    local ops = render(ui.draw_daily, daily_state(items), "open", 1, 78)
+    local found = false
+    for _, o in ipairs(ops) do
+        if o.op == "text" and o.text and o.text:find("Meditate", 1, true)
+            and o.text:find("(done)", 1, true) then
+            found = true
+        end
+    end
+    check("done daily item's topic gets the (done) suffix", found)
+end
+
+do
+    -- Every row count from empty to a full page and beyond.
+    for _, n in ipairs({ 0, 1, 2, 7, 8, 9, 16, 17, 40 }) do
+        local items = {}
+        for i = 1, n do
+            items[i] = daily_item(i, (i % 24) * 60, string.format("%d:00 AM", (i % 12) + 1),
+                "Habit " .. i, i % 3 == 0)
+        end
+        local ops, zones = render(ui.draw_daily, daily_state(items), "open", 1, 78)
+        check_in_bounds(string.format("%2d daily items", n), ops)
+        check_zones_sane(string.format("%2d daily items", n), zones)
+        check_no_overlap(string.format("%2d daily items", n), zones)
+    end
+end
+
+do
+    -- A long topic must truncate rather than run into the delete zone.
+    local items = { daily_item(1, 420, "12:00 PM", string.rep("VeryLongHabitTopic", 8), false) }
+    local ops = render(ui.draw_daily, daily_state(items), "open", 1, 78)
+    check_in_bounds("very long topic truncates in bounds", ops)
+end
+
+do
+    local ops, zones = render(ui.draw_daily, daily_state({}), "open", 1, 78)
+    check_in_bounds("empty state", ops)
+    check("empty state has no toggle/delete zones", #zones == 4) -- nav bar only
+
+    local joined = {}
+    for _, o in ipairs(ops) do
+        if o.op == "text" and o.text then joined[#joined + 1] = o.text end
+    end
+    joined = table.concat(joined, "|")
+    check("empty state names the real add path (Telegram)",
+        joined:find("Telegram", 1, true) ~= nil)
+    check("empty state shows the /daily command shape",
+        joined:find("/daily", 1, true) ~= nil)
+
+    -- "no data yet" must stay distinct from "you have no daily habits":
+    -- same reasoning as the identical Learning-screen check above.
+    local ops2 = render(ui.draw_daily, nil, "connecting", 1, nil)
+    check_in_bounds("no state yet", ops2)
+    local joined2 = {}
+    for _, o in ipairs(ops2) do
+        if o.op == "text" and o.text then joined2[#joined2 + 1] = o.text end
+    end
+    joined2 = table.concat(joined2, "|")
+    check("waiting state says it is waiting", joined2:find("Waiting", 1, true) ~= nil)
+    check("waiting state is not the empty state",
+        joined2:find("Nothing here yet", 1, true) == nil)
+end
+
+do
+    -- Paging through a long daily list.
+    local items = {}
+    for i = 1, 40 do
+        items[i] = daily_item(i, (i % 24) * 60, string.format("%d:00 AM", (i % 12) + 1), "Habit " .. i)
+    end
+    local total_pages = math.ceil(40 / L.daily_rows_per_page)
+    for p = 1, total_pages do
+        local ops, zones = render(ui.draw_daily, daily_state(items), "open", p, 78)
+        check_in_bounds(string.format("daily page %d/%d", p, total_pages), ops)
+        check_no_overlap(string.format("daily page %d/%d", p, total_pages), zones)
+        local swipe
+        for _, z in ipairs(zones) do
+            if z.kind == "daily_swipe_area" then swipe = z end
+        end
+        check(string.format("page %d has a swipe area with the page count", p),
+            swipe and swipe.total_pages == total_pages)
+    end
+
+    -- Clamping: asking for a page past the end must come back clamped.
+    local _, _, effective = render(ui.draw_daily, daily_state(items), "open", 99, 78)
+    check_eq("out-of-range page clamps to the last one", effective, total_pages)
+end
+
+do
+    -- Armed delete state, mirroring the dashboard's own "connection
+    -- states + armed delete" check above.
+    local items = {
+        daily_item(1, 420, "7:00 AM", "Meditate"),
+        daily_item(2, 480, "8:00 AM", "Stretch"),
+    }
+    local ops, zones = render(ui.draw_daily, daily_state(items), "open", 1, 2, 78)
+    check_in_bounds("armed delete", ops)
+    check_no_overlap("armed delete", zones)
+end
+
 print("\n=== nav bar reflects the active screen ===")
 do
     local function active_tab_of(ops)
@@ -615,7 +786,12 @@ do
         learning_state({ course(1, "Spanish", 40) }), "open", 1, 78)
     check_eq("learning screen highlights Learning", active_tab_of(learn_ops), "Learning")
 
+    local daily_ops = render(ui.draw_daily,
+        daily_state({ daily_item(1, 420, "7:00 AM", "Meditate") }), "open", 1, 78)
+    check_eq("daily screen highlights Daily", active_tab_of(daily_ops), "Daily")
+
     check_eq("the Lists tab is gone", ui.NAV_TABS[2], "Learning")
+    check_eq("the Habits tab is now Daily", ui.NAV_TABS[3], "Daily")
 
     -- Restoring the nav bar after a toast must preserve which tab is
     -- active. Passing no tab used to be safe because Today was always
@@ -742,6 +918,88 @@ do
     local ops2, zones2 = render(ui.draw_confirm_exit)
     check_in_bounds("confirm exit", ops2)
     check_no_overlap("confirm exit", zones2)
+end
+
+print("\n=== Network Info popup ===")
+do
+    -- Real values captured from this project's own device (2026-08-21
+    -- live SSH session) -- see get_network_info()'s doc comment in
+    -- daemon.lua.
+    local info = {
+        ssid = "Basik#Ops",
+        ipv4 = "192.168.100.232",
+        mask = "255.255.255.0",
+        gateway = "192.168.100.1",
+        signal = "-41 dBm",
+        mac = "74:C2:46:D4:7A:C3",
+    }
+    local ops, box = render(ui.draw_network_info_popup, info)
+    check_in_bounds("network info popup", ops)
+    check("popup card is on-screen",
+        box and box.x >= 0 and box.y >= 0
+            and box.x + box.w <= L.screen_w and box.y + box.h <= L.screen_h)
+    check_eq("card width matches L.netinfo_card_w", box.w, L.netinfo_card_w)
+    check_eq("card height matches L.netinfo_card_h", box.h, L.netinfo_card_h)
+
+    local text_blob = {}
+    for _, o in ipairs(ops) do
+        if o.op == "text" and o.text then text_blob[#text_blob + 1] = o.text end
+    end
+    local joined = table.concat(text_blob, "|")
+    check("shows the title", joined:find("NETWORK INFO", 1, true) ~= nil)
+    check("shows the IPv4 hero value", joined:find(info.ipv4, 1, true) ~= nil)
+    check("shows the SSID", joined:find(info.ssid, 1, true) ~= nil)
+    for _, field in ipairs({ "mask", "gateway", "signal", "mac" }) do
+        check("shows the " .. field .. " value", joined:find(info[field], 1, true) ~= nil)
+    end
+    check("shows the dismiss hint", joined:find("Tap outside to close", 1, true) ~= nil)
+
+    -- The IPv4 value must actually be drawn at its hero size, not just
+    -- present somewhere in the text -- a regression that shrank it back
+    -- to the same size as everything else wouldn't be caught by the
+    -- substring checks above.
+    local ipv4_size = nil
+    for _, o in ipairs(ops) do
+        if o.op == "text" and o.text == info.ipv4 then ipv4_size = o.size end
+    end
+    check_eq("IPv4 renders at the hero size", ipv4_size, L.netinfo_hero_size)
+
+    -- Card height is now FIXED (a designed layout, not one that grows
+    -- per field) -- confirm it really doesn't move across the two SSID
+    -- length regimes below, since a shifted card height would silently
+    -- misplace the reference-field block or the hint relative to it.
+    local short_ssid_info = {}
+    for k, v in pairs(info) do short_ssid_info[k] = v end
+    short_ssid_info.ssid = "A"
+    local _, box_short = render(ui.draw_network_info_popup, short_ssid_info)
+    check_eq("card height is fixed regardless of SSID length", box_short.h, box.h)
+
+    -- A 32-character SSID (the real wifi maximum, well past this
+    -- project's own short "Basik#Ops") must still fit the card at its
+    -- OWN right edge, not just the screen's -- see M.draw_network_info_popup's
+    -- doc comment on why this steps the font size down instead of
+    -- truncating an identity string the user needs to read in full.
+    local long_ssid_info = {}
+    for k, v in pairs(info) do long_ssid_info[k] = v end
+    long_ssid_info.ssid = string.rep("X", 32)
+    local ops_long, box_long = render(ui.draw_network_info_popup, long_ssid_info)
+    check_in_bounds("network info popup, 32-char SSID", ops_long)
+    check_eq("32-char SSID card height still matches", box_long.h, box.h)
+    local long_ssid_size = nil
+    for _, o in ipairs(ops_long) do
+        if o.op == "text" and o.text == long_ssid_info.ssid then long_ssid_size = o.size end
+    end
+    check_eq("32-char SSID steps down to size 1", long_ssid_size, 1)
+
+    -- "unknown" placeholders (a command that failed or didn't match --
+    -- see get_network_info()) are the shortest realistic values; nothing
+    -- exotic, just confirming the layout survives them too.
+    local unknown_info = {
+        ssid = "unknown", ipv4 = "unknown", mask = "unknown",
+        gateway = "unknown", signal = "unknown", mac = "unknown",
+    }
+    local ops_unknown = render(ui.draw_network_info_popup, unknown_info)
+    check_in_bounds("network info popup, all unknown", ops_unknown)
 end
 
 print("")

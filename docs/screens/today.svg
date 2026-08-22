@@ -52,7 +52,7 @@
   <rect x="24" y="680" width="272" height="48" fill="#949494"/>
   <text x="32" y="706.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Exit Dashboard</text>
   <rect x="304" y="680" width="272" height="48" fill="#949494"/>
-  <text x="312" y="706.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Restart SSH</text>
+  <text x="312" y="706.56" font-size="7.4" font-family="DejaVu Sans Mono, Consolas, monospace" font-weight="normal" fill="white" text-anchor="start" letter-spacing="0">Network Info</text>
   <rect x="0" y="736" width="600" height="64" fill="white"/>
   <rect x="0" y="736" width="600" height="2" fill="black"/>
   <rect x="0" y="738" width="150" height="62" fill="black"/>

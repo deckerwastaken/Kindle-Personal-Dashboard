@@ -2,6 +2,12 @@
 # since this folder should be self-explanatory on its own).
 .env
 
+# Google Sheets service-account key(s) -- a real, downloadable credential
+# file from Google Cloud Console (see docs/GOOGLE_SHEETS_SETUP.md). The
+# whole directory is ignored, not just one filename, so anything saved
+# here under any name is covered.
+secrets/
+
 # Local persisted state -- personal task data, shouldn't be versioned.
 data/state.json
 data/.state_*.tmp

@@ -122,17 +122,18 @@ M.LAYOUT = {
     -- direct-calculation check as the original 90->74 trim below).
     usage_card_h = 78,
 
-    -- Exit Dashboard / Restart SSH buttons, anchored to the bottom (see
+    -- Exit Dashboard / Network Info buttons, anchored to the bottom (see
     -- draw_dashboard) rather than placed relative to the usage card,
     -- specifically so they never collide with the variable-height task
     -- list above them.
     --
     -- GREW from 32 to 48 (2026-08-02). These are the two controls a
-    -- LOCKED-OUT user relies on to recover the device (get SSH back, or
-    -- bail out to reboot) -- every other tap target on this screen is
-    -- bigger (checkbox 40px, task row 56px, nav tab 64px), and this is
-    -- exactly the situation where an undersized target is most costly and
-    -- most frustrating, especially on this device's IR touch panel, whose
+    -- LOCKED-OUT user relies on to recover the device (check the current
+    -- IP to reconnect over SSH, or bail out to reboot) -- every other tap
+    -- target on this screen is bigger (checkbox 40px, task row 56px, nav
+    -- tab 64px), and this is exactly the situation where an undersized
+    -- target is most costly and most frustrating, especially on this
+    -- device's IR touch panel, whose
     -- calibration has not been confirmed on hardware. 48px lands mid-way
     -- between the checkbox and task-row targets. Growing this required
     -- reclaiming 16px of vertical budget from usage_card_h above (see its
@@ -216,7 +217,7 @@ local L = M.LAYOUT
 -- out of sync once the footer controls row was added below the task
 -- list, and again when that row grew from 32 to 48px -- nothing kept the
 -- two in sync, and the user found the toast visibly overlapping the Exit
--- Dashboard/Restart SSH buttons on the real device. footer_y is a fixed
+-- Dashboard/Network Info buttons on the real device. footer_y is a fixed
 -- value on every draw, so it's computed exactly ONCE here and referenced
 -- by both draw_dashboard's footer section and flash_message below --
 -- there is no other place in this file computing "near the bottom of the
@@ -310,6 +311,55 @@ L.learn_pager_y = L.screen_h - L.nav_bar_h - L.gap_lg - L.task_row_h
 -- silently creating a -4px overlap that a comment had claimed was fine.)
 L.learn_rows_per_page = math.floor(
     (L.learn_pager_y - L.gap_lg - L.learn_row_first_y + L.learn_row_gap) / L.learn_row_pitch)
+
+-- Daily habits screen geometry. Reuses the TASK row rhythm (task_row_h/
+-- task_row_gap), not the Learning row rhythm, because draw_daily_row
+-- below mirrors draw_dashboard's task row almost exactly (checkbox,
+-- delete zone, toggle zone) rather than draw_learning_row's read-only
+-- bar treatment -- see draw_daily_row's own comment for why. The header
+-- lands on the same y-positions as Learning's (title at margin, summary
+-- at date_y, rows starting at divider_y + divider_h + gap_sm) for the
+-- identical reason: switching tabs shouldn't visually jolt.
+L.daily_title_y = L.margin
+L.daily_summary_y = L.date_y
+L.daily_row_first_y = L.divider_y + L.divider_h + L.gap_sm -- 122, = learn_row_first_y
+L.daily_row_pitch = L.task_row_h + L.task_row_gap
+-- Pager pinned to the bottom, anchored UP from the nav bar -- identical
+-- formula to L.learn_pager_y, so this never moves as the item count
+-- changes and hiding it (single page) moves nothing either.
+L.daily_pager_y = L.screen_h - L.nav_bar_h - L.gap_lg - L.task_row_h
+L.daily_rows_per_page = math.floor(
+    (L.daily_pager_y - L.gap_lg - L.daily_row_first_y + L.task_row_gap) / L.daily_row_pitch)
+-- Width reserved for the TIME column, between the checkbox and the
+-- topic text. Sized for the widest possible display string this app
+-- ever produces ("12:00 PM", 8 glyphs at size 1 = 64px -- see
+-- telegram_bot.py's _parse_daily_time, which always normalizes to a
+-- 12-hour "H:MM AM/PM" string) plus gap_xs(8) of breathing room before
+-- the topic column starts, so even the widest time never touches the
+-- topic. A literal 64 + L.gap_xs rather than a char_w()-based
+-- computation: char_w() isn't defined until further down this file (it
+-- needs CARD_CHAR_W_S1, declared after this LAYOUT block), so nothing up
+-- here can call it yet -- same reason several other geometry values
+-- above this point (e.g. task_row_h) are plain literals too.
+L.daily_time_col_w = 64 + L.gap_xs
+
+-- Vertical rule between the TIME and TOPIC columns -- the one visual
+-- signature that actually makes this screen read as a "day view" the
+-- way the user originally asked for, rather than a task list with an
+-- extra field bolted on. draw_daily_row right-aligns each row's time
+-- text against this line (draw_daily draws the line itself, once per
+-- visible page, not per row -- a single unbroken rule reads as a
+-- timeline; L.daily_row_gap-sized segments per row would just look
+-- like a mistake). L.daily_divider_gap of clearance on both sides: the
+-- widest time string ("12:00 PM", 64px at size 1) ends that far short
+-- of the line, and the topic column starts that far past the line's
+-- own 2px width. One named constant feeding both this and
+-- draw_daily_row's time_x right-alignment below, so the two can't
+-- silently drift out of sync the way a second hardcoded number would.
+L.daily_divider_gap = L.gap_sm
+L.daily_divider_x = L.margin + L.task_checkbox_w + L.gap_sm + 64 + L.daily_divider_gap
+L.daily_divider_w = 2
+L.daily_topic_x = L.daily_divider_x + L.daily_divider_w + L.daily_divider_gap
 
 L.task_list_max_bottom_y = L.task_row_first_y + (L.max_visible_tasks + 2) * (L.task_row_h + L.task_row_gap)
 L.usage_card_label_y = L.task_list_max_bottom_y + L.usage_card_gap_above
@@ -420,9 +470,27 @@ M.dry_run = false -- if true, print commands instead of executing (used by
                    -- tools/fbink_selftest.sh style manual testing, and
                    -- automatically enabled if fbink_path doesn't exist)
 
-function M.init(fbink_path, log)
+-- Second, OPTIONAL fbink binary used ONLY for the lock screen's image blit
+-- (see M.draw_blank_screen). This build's regular fbink_path reports
+-- `Image=No` in its --help banner (KOReader bundles a MINIMAL build with
+-- no PNG/JPEG loader compiled in, since KOReader decodes images itself)
+-- -- see kindle-daemon/ops/FBINK_IMAGE_UPGRADE.md for how to get a
+-- full-featured binary. Kept as a SEPARATE path/binary rather than
+-- replacing fbink_path everywhere: every other screen's pixel-perfect
+-- layout in this file was calibrated against the exact behavior of the
+-- currently-installed binary (see this file's header comment), and
+-- swapping it wholesale would risk silently shifting that calibration.
+-- nil (the default) means the feature is simply off.
+M.fbink_image_path = nil
+-- Array of absolute PNG paths to choose from on each lock (one is picked
+-- at random every time -- see draw_lock_screen_image). {} or nil = off.
+M.lock_screen_image_paths = {}
+
+function M.init(fbink_path, log, fbink_image_path, lock_screen_image_paths)
     M.fbink_path = fbink_path or M.fbink_path
     M.debug_log = log
+    M.fbink_image_path = fbink_image_path
+    M.lock_screen_image_paths = lock_screen_image_paths or {}
 
     local f = io.open(M.fbink_path, "rb")
     if f then
@@ -437,6 +505,34 @@ function M.init(fbink_path, log)
     end
 end
 
+--- Returns the subset of M.lock_screen_image_paths that actually exist on
+--- disk right now (empty if the alt image-capable binary itself is
+--- missing, or none of the configured images are present). Checked fresh
+--- each call (not cached at init) so adding/removing an image file, or
+--- dropping the binary back out to roll back to the plain "Locked" text,
+--- takes effect on the very next lock -- no daemon restart needed.
+--- Filtering out individually-missing images (rather than requiring all
+--- of them) means one bad path in the list degrades to "fewer images in
+--- the rotation," not "no image at all."
+local function existing_lock_screen_images()
+    if not M.fbink_image_path then
+        return {}
+    end
+    local bin = io.open(M.fbink_image_path, "rb")
+    if not bin then return {} end
+    bin:close()
+
+    local existing = {}
+    for _, path in ipairs(M.lock_screen_image_paths) do
+        local f = io.open(path, "rb")
+        if f then
+            f:close()
+            existing[#existing + 1] = path
+        end
+    end
+    return existing
+end
+
 local function shell_quote(s)
     return "'" .. tostring(s):gsub("'", [['\'']]) .. "'"
 end
@@ -444,8 +540,14 @@ end
 --- Run fbink with the given argument list (array of strings; each will
 --- be shell-quoted). Returns true/false, and logs failures rather than
 --- raising -- a bad draw call should never take the whole daemon down.
-function M.run(args)
-    local parts = { shell_quote(M.fbink_path) }
+---
+--- bin_path is an optional override of which fbink binary to invoke
+--- (defaults to M.fbink_path, the normal calibrated one every other draw
+--- call in this file uses) -- only the lock screen's image blit passes
+--- something else here, see M.draw_blank_screen.
+function M.run(args, bin_path)
+    bin_path = bin_path or M.fbink_path
+    local parts = { shell_quote(bin_path) }
     for _, a in ipairs(args) do
         parts[#parts + 1] = shell_quote(a)
     end
@@ -551,8 +653,13 @@ end
 -- currently never moves, to make room for a stub nobody was using. At
 -- size 1, "Learning" is 8 glyphs * 8px = 64px drawn at tab_x + 20, so it
 -- ends 84px into a 150px tab -- comfortably inside it.
-M.NAV_TABS = { "Today", "Learning", "Habits", "Home" }
-M.NAV_TAB_IMPLEMENTED = { Today = true, Learning = true }
+--
+-- "Daily" replaced the "Habits" stub the same way, once the Daily habits
+-- feature (see M.draw_daily below) actually shipped -- same reasoning,
+-- no re-flow, "Daily" at size 1 is 5 glyphs * 8px = 40px, well within the
+-- tab.
+M.NAV_TABS = { "Today", "Learning", "Daily", "Home" }
+M.NAV_TAB_IMPLEMENTED = { Today = true, Learning = true, Daily = true }
 
 --- Draws the bottom nav bar and returns its hit_zones.
 ---
@@ -1227,7 +1334,7 @@ function M.draw_dashboard(state, conn_status, task_page, armed_delete_id, batter
         h = (card_box_y + L.usage_card_h) - card_y,
     }
 
-    -- --- footer controls: Exit Dashboard / Restart SSH ---
+    -- --- footer controls: Exit Dashboard / Network Info ---
     -- Anchored to L.footer_y (a fixed value computed once, see its
     -- definition above) rather than a per-call local, specifically so
     -- M.flash_message() below can share the exact same position instead
@@ -1252,13 +1359,13 @@ function M.draw_dashboard(state, conn_status, task_page, armed_delete_id, batter
             x = L.margin, y = footer_y, w = footer_btn_w, h = L.footer_controls_h,
         }
 
-        local ssh_btn_x = L.margin + footer_btn_w + L.gap_xs
-        M.fill_rect(ssh_btn_x, footer_y, footer_btn_w, L.footer_controls_h, "GRAY6")
-        M.draw_text(ssh_btn_x + L.gap_xs, footer_label_y, "Restart SSH",
+        local netinfo_btn_x = L.margin + footer_btn_w + L.gap_xs
+        M.fill_rect(netinfo_btn_x, footer_y, footer_btn_w, L.footer_controls_h, "GRAY6")
+        M.draw_text(netinfo_btn_x + L.gap_xs, footer_label_y, "Network Info",
             { size = 1, fg = "WHITE", bg = "GRAY6" })
         hit_zones[#hit_zones + 1] = {
-            kind = "restart_ssh_button",
-            x = ssh_btn_x, y = footer_y, w = footer_btn_w, h = L.footer_controls_h,
+            kind = "network_info_button",
+            x = netinfo_btn_x, y = footer_y, w = footer_btn_w, h = L.footer_controls_h,
         }
     end
 
@@ -1275,7 +1382,7 @@ end
 --
 -- A dedicated full screen listing courses and books, reached from the
 -- "Learning" nav tab. It shows ONLY learning items -- no tasks, no
--- Claude usage card, no Exit Dashboard / Restart SSH footer. Those all
+-- Claude usage card, no Exit Dashboard / Network Info footer. Those all
 -- stay on the Today screen where they already live.
 --
 -- Every row draws from four fields the backend has already derived
@@ -1482,15 +1589,233 @@ function M.draw_learning(state, conn_status, page, battery_percent)
     return hit_zones, page
 end
 
+-- ===================== DAILY habits screen =====================
+--
+-- A recurring checklist modeled on a calendar day view -- see
+-- state.py's "daily habits" section for the full design. Reached from
+-- the "Daily" nav tab (the old unimplemented "Habits" stub).
+--
+-- UNLIKE Learning, this screen is NOT read-only: toggling an item done
+-- and deleting it both happen right here on the device, reusing the
+-- Today task list's exact checkbox/delete-zone interactions (see
+-- draw_daily_row below and daemon.lua's handle_daily_tap). Only ADDING a
+-- new item stays Telegram-only, because that's the one operation that
+-- needs a digit (a time-of-day) and this app's on-screen keyboard has
+-- none -- the identical reasoning that already makes Learning entirely
+-- Telegram-driven, applied to just one of this screen's three actions
+-- instead of all of them.
+
+--- Draws one daily-habit row. A close copy of draw_dashboard's task row
+--- (checkbox, delete zone, toggle zone -- the two lists share the
+--- identical tap/double-tap-to-delete interaction), with one structural
+--- addition: a TIME column between the checkbox and the topic text,
+--- reserving L.daily_time_col_w for the widest display string this app
+--- ever produces.
+---
+--- UNLIKE tasks (and every other list in this app), a finished daily
+--- item does NOT sink to the bottom -- the caller (M.draw_daily) passes
+--- items through in the backend's own time-sorted order with no
+--- partition step, because this screen models a calendar day view: an
+--- item stays in its fixed time slot regardless of done state (see
+--- state.py's snapshot()/list_dailies()). A finished item instead gets
+--- " (done)" appended to its topic, the same suffix convention the Today
+--- task list already uses for its own done tasks.
+local function draw_daily_row(item, row_y, armed_delete_id, hit_zones)
+    local is_armed = (armed_delete_id ~= nil and item.id == armed_delete_id)
+    local row_bg = is_armed and "GRAY6" or "WHITE"
+
+    M.fill_rect(L.margin, row_y, L.screen_w - 2 * L.margin, L.task_row_h, row_bg)
+
+    -- Checkbox: identical construction to draw_dashboard's (see that
+    -- function's own comment for why an outline is faked as a filled
+    -- square with a smaller inset square knocked out).
+    local box_y = row_y + L.gap_xs
+    M.fill_rect(L.margin, box_y, L.task_checkbox_w, L.task_checkbox_w, "BLACK")
+    if item.done then
+        M.draw_text(L.margin + 6, box_y + 12, "X", { size = 2, fg = "WHITE", bg = "BLACK" })
+    else
+        local inset = L.task_checkbox_border
+        M.fill_rect(L.margin + inset, box_y + inset,
+            L.task_checkbox_w - 2 * inset, L.task_checkbox_w - 2 * inset, row_bg)
+    end
+
+    -- Time column: precomputed display text, drawn verbatim -- this file
+    -- does zero time-formatting of its own (see telegram_bot.py's
+    -- _parse_daily_time, the ONE place that logic lives). Right-aligned
+    -- against L.daily_divider_x so every row's time lines up down a
+    -- single straight column regardless of "7:00 AM" vs "12:00 PM"
+    -- differing by a glyph -- the same baseline (row_y + 14) as the
+    -- topic text below, not the +20 this used to be: that mismatch left
+    -- the time visibly sitting lower than its own topic on every row.
+    local text_fg = item.done and "GRAY6" or "BLACK"
+    local time_text = item.time or ""
+    local time_x = L.daily_divider_x - L.daily_divider_gap - text_w(time_text, 1)
+    M.draw_text(time_x, row_y + 14, time_text, { size = 1, bg = row_bg, fg = text_fg })
+
+    -- Topic, after the divider. Rough length cap, same "not
+    -- pixel-measured, revisit on hardware" treatment as the task row's
+    -- own max_label_chars -- smaller than that row's 34 since this row
+    -- also spends the time column + divider on its width.
+    local topic = item.topic or ""
+    if item.done then topic = topic .. "  (done)" end
+    local max_topic_chars = 26
+    if #topic > max_topic_chars then
+        topic = topic:sub(1, max_topic_chars - 1) .. "..."
+    end
+    M.draw_text(L.daily_topic_x, row_y + 14, topic, { size = 1, bg = row_bg, fg = text_fg })
+
+    -- Delete zone, identical to the task row's.
+    local del_x = L.screen_w - L.margin - L.task_delete_w
+    if is_armed then
+        M.fill_rect(del_x, row_y, L.task_delete_w, L.task_row_h, "BLACK")
+        M.draw_text(del_x + 12, row_y + 14, "x", { size = 2, fg = "WHITE", bg = "BLACK" })
+    else
+        M.draw_text(del_x + 12, row_y + 14, "x", { size = 2, fg = "BLACK", bg = row_bg })
+    end
+    hit_zones[#hit_zones + 1] = {
+        kind = "delete_daily_zone",
+        id = item.id,
+        x = del_x, y = row_y, w = L.task_delete_w, h = L.task_row_h,
+    }
+
+    -- Toggle zone spans checkbox+time+topic, stopping short of the
+    -- delete zone -- same shrink-to-avoid-overlap treatment as the task
+    -- row's toggle_task zone.
+    local toggle_w = L.screen_w - 2 * L.margin - L.task_delete_w - L.gap_xs
+    hit_zones[#hit_zones + 1] = {
+        kind = "toggle_daily",
+        id = item.id,
+        x = L.margin, y = row_y, w = toggle_w, h = L.task_row_h,
+    }
+end
+
+--- Renders the Daily habits screen. Same contract as M.draw_learning:
+--- returns (hit_zones, effective_page), page clamped to however many
+--- pages currently exist.
+---
+--- state may be nil (not connected / nothing received yet), drawn as an
+--- explicit "waiting" message and kept DISTINCT from "you have no daily
+--- habits yet" -- same reasoning as M.draw_learning's identical
+--- treatment.
+---
+--- armed_delete_id (optional): the id of a daily item currently in the
+--- "tap again to delete" armed state -- same convention as
+--- M.draw_dashboard's own armed_delete_id, but a SEPARATE id namespace
+--- (see state.py: daily items have their own id sequence, independent of
+--- tasks). daemon.lua is responsible for only ever passing this in when
+--- the armed row actually belongs to THIS list -- see its
+--- armed_delete_kind doc comment.
+function M.draw_daily(state, conn_status, page, armed_delete_id, battery_percent)
+    local hit_zones = {}
+    page = page or 1
+
+    M.fill_rect(0, 0, L.screen_w, L.screen_h, "WHITE")
+
+    M.draw_text(L.margin, L.daily_title_y, "DAILY", { size = 3 })
+
+    -- nil means "no state received yet"; an empty table means "connected,
+    -- and you genuinely have nothing tracked" -- same distinction
+    -- M.draw_learning already draws.
+    local items = nil
+    if state then items = state.dailies or {} end
+
+    if items then
+        local done_count = 0
+        for _, it in ipairs(items) do
+            if it.done then done_count = done_count + 1 end
+        end
+        local summary = (#items > 0)
+            and string.format("%d/%d done today", done_count, #items)
+            or "Nothing tracked yet"
+        M.draw_text(L.margin, L.daily_summary_y, summary, { size = L.date_font_size })
+    end
+
+    -- Connection status + battery: identical geometry and "only draw the
+    -- badge when something's wrong" treatment as M.draw_learning.
+    if conn_status ~= "open" then
+        local badge_x = L.screen_w - L.status_badge_w - L.margin
+        local status_text = conn_status == "connecting" and "CONNECTING" or "OFFLINE"
+        M.fill_rect(badge_x, L.status_badge_y, L.status_badge_w, L.status_badge_h, "BLACK")
+        M.draw_text(badge_x + L.gap_xs, L.status_text_y, status_text,
+            { size = L.status_font_size, fg = "WHITE", bg = "BLACK" })
+    end
+    draw_battery(battery_percent)
+
+    M.fill_rect(L.margin, L.divider_y, L.screen_w - 2 * L.margin, L.divider_h, "BLACK")
+
+    if not items then
+        M.draw_text(L.margin, L.daily_row_first_y, "Waiting for data from laptop...", { size = 1 })
+    elseif #items == 0 then
+        -- No on-device "+Add" affordance, matching Learning's precedent
+        -- for the identical reason (adding needs a digit): empty state
+        -- points at the Telegram command instead.
+        M.draw_text(L.margin, L.daily_row_first_y, "Nothing here yet.", { size = 2 })
+        M.draw_text(L.margin, L.daily_row_first_y + 16 + L.gap_sm,
+            "Add daily habits from Telegram.", { size = 1 })
+        M.draw_text(L.margin, L.daily_row_first_y + 16 + L.gap_sm + 8 + L.gap_xs,
+            "/daily 7:00 AM Meditate", { size = 1 })
+    else
+        -- Items arrive already time-sorted (state.py's snapshot()) --
+        -- deliberately no partition-by-done step here, unlike every other
+        -- list in this app. See draw_daily_row's own comment for why.
+        local total = #items
+        local total_pages = math.max(1, math.ceil(total / L.daily_rows_per_page))
+        if page > total_pages then page = total_pages end
+        if page < 1 then page = 1 end
+
+        local start_idx = (page - 1) * L.daily_rows_per_page + 1
+        local end_idx = math.min(start_idx + L.daily_rows_per_page - 1, total)
+        local rows_shown = end_idx - start_idx + 1
+
+        for idx = start_idx, end_idx do
+            local row_y = L.daily_row_first_y + (idx - start_idx) * L.daily_row_pitch
+            draw_daily_row(items[idx], row_y, armed_delete_id, hit_zones)
+        end
+
+        -- The day-view rule: one continuous line laid OVER this page's
+        -- rows (drawn after them, not before -- each row's own
+        -- background fill would otherwise paint right over it, since
+        -- draw_daily_row's row rect spans the full row width including
+        -- wherever this line crosses). Deliberately one unbroken line,
+        -- not a per-row segment: that's what makes it read as a
+        -- timeline rather than a stray mark on each row (see
+        -- L.daily_divider_x's own comment for the exact placement math).
+        M.fill_rect(L.daily_divider_x, L.daily_row_first_y, L.daily_divider_w,
+            rows_shown * L.daily_row_pitch - L.task_row_gap, "BLACK")
+
+        -- Swipe region, same "registered but excluded from hit_test by
+        -- kind" treatment as the task list's and Learning's own swipe
+        -- areas -- see GESTURE_ZONE_KINDS in daemon.lua.
+        hit_zones[#hit_zones + 1] = {
+            kind = "daily_swipe_area",
+            total_pages = total_pages,
+            x = 0, y = L.daily_row_first_y,
+            w = L.screen_w,
+            h = L.daily_pager_y - L.daily_row_first_y,
+        }
+
+        if total_pages > 1 then
+            draw_pager(L.daily_pager_y, page, total_pages, "daily", hit_zones)
+        end
+    end
+
+    for _, z in ipairs(draw_nav_bar("Daily")) do
+        hit_zones[#hit_zones + 1] = z
+    end
+
+    M.flush("GC16")
+    return hit_zones, page
+end
+
 --- Cheap "toast" message flashed on screen -- used for stub nav taps
---- ("Lists is coming soon"), not-connected warnings, and Restart SSH
---- results: every current caller is pure FYI with no clickable function
---- of its own, so it's safe for this to sit on top of something else
+--- ("Lists is coming soon") and not-connected warnings: every current
+--- caller is pure FYI with no clickable function of its own, so it's
+--- safe for this to sit on top of something else
 --- for a few seconds. daemon.lua auto-dismisses it after a few seconds
 --- via M.clear_flash_message() below -- this function only draws it.
 ---
 --- Design history, two rounds of real hardware feedback (2026-08-02):
---- (1) originally overlaid the Exit Dashboard/Restart SSH footer row,
+--- (1) originally overlaid the Exit Dashboard/Network Info footer row,
 --- but that meant colliding with two buttons a user might actually want
 --- to tap right after reading the toast, PLUS a real rendering bug (same
 --- GRAY6-on-GRAY6 tone as the buttons meant a fast "A2" partial refresh
@@ -2010,7 +2335,19 @@ end
 --- entirely (see daemon.lua's handle_gesture), so there is nothing on
 --- this screen to hit-test against. That is the point -- a locked
 --- dashboard in a bag should not be tappable.
+--- CHANGED (2026-08-20, user request): if a lock-screen image and a
+--- second, image-capable fbink binary are both configured and present
+--- (see M.init's fbink_image_path/lock_screen_image_paths and
+--- ops/FBINK_IMAGE_UPGRADE.md), show one of those images instead of the
+--- plain white page. Checked fresh on every call rather than once at
+--- startup, so adding/removing image files falls straight into/out of
+--- rotation on the very next lock -- no daemon restart needed.
 function M.draw_blank_screen()
+    local images = existing_lock_screen_images()
+    if #images > 0 then
+        return M.draw_lock_screen_image(images[math.random(#images)])
+    end
+
     M.fill_rect(0, 0, L.screen_w, L.screen_h, "WHITE")
     -- Size 3, matching draw_shutdown_message's terminal notice below --
     -- both are "the dashboard is not currently a dashboard" states, and
@@ -2027,6 +2364,45 @@ function M.draw_blank_screen()
     return {}
 end
 
+--- Image variant of the locked screen -- see M.draw_blank_screen above
+--- for when this is used instead of the plain page. `path` is one entry
+--- of M.lock_screen_image_paths, already confirmed to exist on disk by
+--- existing_lock_screen_images() -- picked randomly by the caller when
+--- more than one is configured, so which poster shows is a surprise each
+--- time the screen locks rather than always the same one.
+---
+--- Blits `path` full-screen via the SEPARATE image-capable binary at
+--- M.fbink_image_path, not M.fbink_path (see
+--- that field's doc comment: the regular binary has no image support
+--- compiled in, and this file's other screens are calibrated against its
+--- exact current behavior, so it's left untouched). `dither` requests
+--- FBInk's own 8x8 ordered software dithering, which the CLI docs
+--- describe as matching the panel's real e-ink grayscale palette exactly
+--- -- this device (Kindle 7/KT2, 2014) predates the models FBInk's
+--- *hardware* dithering (-D) is even provisionally supported on, so
+--- software dithering is the only real option here, not just the
+--- simpler one.
+---
+--- CHANGED (2026-08-20, user request): originally also drew a "Locked"
+--- caption chip over the image -- draw_blank_screen's doc comment above
+--- explains why that word exists on the plain-text version (telling
+--- "deliberately locked" apart from "daemon silently died"). Removed
+--- here at the user's explicit request, image-only. That safety-net
+--- signal is gone on THIS screen as a result -- if "silent daemon death
+--- looks identical to a deliberate lock" ever becomes a live problem
+--- again (see ops/README.md's history of exactly that), bringing the
+--- chip back is the fix, not re-diagnosing the daemon.
+function M.draw_lock_screen_image(path)
+    M.run({
+        "-g", string.format("file=%s,dither", path),
+        "-W", "GC16",
+        "-b", "-q",
+    }, M.fbink_image_path)
+
+    M.flush("GC16")
+    return {}
+end
+
 --- One-shot terminal message drawn right before daemon.lua's actual
 --- `sync; reboot` call -- NOT part of the ui_mode/hit_zones system, since
 --- there is nothing left to tap once this is on screen.
@@ -2034,6 +2410,210 @@ function M.draw_shutdown_message()
     M.fill_rect(0, 0, L.screen_w, L.screen_h, "WHITE")
     M.draw_text(L.margin, math.floor(L.screen_h / 2) - 16, "Shutting down...", { size = 3 })
     M.flush("GC16")
+end
+
+-- ===================== Network Info popup =====================
+--
+-- Shown on top of whatever the dashboard currently looks like when
+-- "Network Info" is tapped (see draw_dashboard's footer controls) -- an
+-- overlay, not a new ui_mode, the same "state that sits on top of an
+-- unrelated screen" treatment PIN entry gets, and for the same reason:
+-- dismissing it should restore exactly whatever the dashboard was
+-- already showing, rather than this file having to remember and
+-- re-derive that. daemon.lua owns showing/hiding it (the 10s
+-- auto-dismiss timer, tap-outside detection, and re-asserting it on top
+-- of any redraw() that fires while it's up -- a backend state push, the
+-- periodic clock tick) -- this file only draws the card for whatever
+-- info it's given.
+--
+-- No config, no restart command: unlike the "Restart SSH" button this
+-- replaced, this is read-only information -- see daemon.lua's
+-- get_network_info() for where the values come from (ifconfig/route/iw,
+-- confirmed against this exact device 2026-08-21).
+--
+-- DESIGN (2026-08-21, redesigned after the first version -- a plain
+-- BLACK-bordered WHITE box with six identical "Label: Value" lines --
+-- read as a flat, undifferentiated wall of text with no hierarchy at
+-- all, and used a container style ("outlined box") that doesn't exist
+-- anywhere else in this app). This version is instead a second GRAY6
+-- "info card" -- the exact same flat-fill, no-border construction as the
+-- CLAUDE USAGE card on the dashboard (see draw_dashboard's usage-card
+-- block) -- floating centered on screen instead of docked at a fixed
+-- position. Three deliberate hierarchy tiers, reusing techniques already
+-- established elsewhere in this file rather than inventing new ones:
+--   1. IPv4 (the one value someone actually opens this popup FOR -- it's
+--      what gets typed into `ssh`) gets its own bordered "hero" box --
+--      DELIBERATELY NOT this app's usual black-fill inversion (see the
+--      function body for why: that treatment means "active/tappable"
+--      everywhere else in this file, with zero exceptions, and this
+--      value is purely displayed).
+--   2. SSID (confirms "yes, this is the network I think it's on") sits
+--      one size step above the rest, no inversion -- visually secondary
+--      to the IP, but distinct from pure reference data.
+--   3. Subnet mask / gateway / signal / MAC -- true reference fields,
+--      glanced at rarely -- share a single divider-column list, the same
+--      right-aligned-label / vertical-rule / left-aligned-value
+--      construction the Daily screen's time column uses (see
+--      draw_daily_row's own comment for the original of this pattern).
+L.netinfo_card_w = 480 -- narrower than the dashboard's 552 full content
+                        -- width on purpose: this is six facts glanced at
+                        -- for a few seconds, not a docked instrument
+                        -- panel, and a narrower floating card reads more
+                        -- like a popup and less like another dashboard
+                        -- section.
+L.netinfo_card_h = 296 -- derived from, and only correct alongside, the
+                        -- exact layout math in M.draw_network_info_popup
+                        -- below (title + hero box + ssid row + 4
+                        -- reference rows + hint, each spaced by the
+                        -- usual gap_xs/gap_sm/gap_lg rhythm) -- if that
+                        -- function's layout ever changes, recompute this
+                        -- by hand the same way, don't just nudge it
+                        -- until it looks right.
+                        --
+                        -- This card also deliberately has NO border (see
+                        -- the function body) -- its edges only read
+                        -- cleanly because the whole y=154..538 band it
+                        -- floats over (draw_dashboard's task-list area)
+                        -- is plain WHITE, so every edge lands on a hard
+                        -- GRAY6-vs-WHITE boundary. That correctness is
+                        -- CONTINGENT, not structural: if this popup's
+                        -- vertical position, or the dashboard's own
+                        -- layout, ever moves this card's y-range toward
+                        -- the GRAY6 usage card (y=594+) or the GRAY6
+                        -- footer buttons (y=680+), a border would need
+                        -- to come back to keep the card legible against
+                        -- a same-tone background.
+L.netinfo_pad = L.gap_lg -- internal padding, all four sides
+L.netinfo_hero_size = 3 -- IPv4's own font size, one step below the
+                         -- title's size-4 clock but still this card's
+                         -- single largest, most emphatic element
+L.netinfo_ssid_max_wide_chars = 27 -- longest SSID that still fits this
+                                    -- card's content width at size 2
+                                    -- (27*16=432=content width exactly);
+                                    -- longer legal SSIDs (up to 32) step
+                                    -- down to size 1 instead of
+                                    -- truncating -- see the function body
+
+--- `info` is {ssid=, ipv4=, mask=, gateway=, signal=, mac=} (see
+--- daemon.lua's get_network_info()) -- a fixed shape, not a generic list,
+--- since each of the six values plays a different, specific visual role
+--- below rather than being an interchangeable row.
+---
+--- Returns the card's rect {x, y, w, h} -- daemon.lua keeps this as
+--- network_info_popup_box and tests taps against it directly with the
+--- same zone_contains() every other hit zone uses, to decide "inside the
+--- popup" (ignore) from "outside" (dismiss).
+function M.draw_network_info_popup(info)
+    local card_x = math.floor((L.screen_w - L.netinfo_card_w) / 2)
+    local card_y = math.floor((L.screen_h - L.netinfo_card_h) / 2)
+    M.fill_rect(card_x, card_y, L.netinfo_card_w, L.netinfo_card_h, "GRAY6")
+
+    local content_x = card_x + L.netinfo_pad
+    local content_w = L.netinfo_card_w - 2 * L.netinfo_pad
+    local WHITE_ON_GRAY = { fg = "WHITE", bg = "GRAY6" }
+
+    local y = card_y + L.netinfo_pad
+    -- Title styled like the CLAUDE USAGE card's own caption label (small
+    -- caps, size 2) rather than a size-3/4 dialog title -- this popup IS
+    -- a second info card, not a modal dialog, and the title should read
+    -- that way at a glance.
+    M.draw_text(content_x, y, "NETWORK INFO", { size = 2, fg = "WHITE", bg = "GRAY6" })
+    y = y + 16 + L.gap_sm
+
+    -- --- Tier 1: IPv4, the hero -----------------------------------
+    M.draw_text(content_x, y, "IPV4 ADDRESS", { size = 1, fg = "WHITE", bg = "GRAY6" })
+    y = y + 8 + L.gap_xs
+    local hero_h = L.gap_xs + 8 * L.netinfo_hero_size + L.gap_xs
+    -- A WHITE box with a 1px BLACK outline, NOT a full BLACK inversion.
+    -- Every other black-filled rect in this file (the active nav tab,
+    -- the checkbox, the delete-armed row, the refresh icon button) means
+    -- "active" or "tappable" -- this value is purely displayed, on a
+    -- screen the user is otherwise tapping around on, so inverting it
+    -- would risk reading as a control that does something when tapped.
+    -- The 1px-outline-around-a-WHITE-track is the same technique the
+    -- CLAUDE USAGE card's own progress bar already uses, for the
+    -- identical reason (see that block's comment) -- reused, not
+    -- invented, and still the highest-contrast pairing this 3-tone
+    -- palette has, so the one value that matters most loses no legibility.
+    M.fill_rect(content_x - 1, y - 1, content_w + 2, hero_h + 2, "BLACK")
+    M.fill_rect(content_x, y, content_w, hero_h, "WHITE")
+    M.draw_text(content_x + L.gap_sm, y + L.gap_xs, info.ipv4,
+        { size = L.netinfo_hero_size, fg = "BLACK", bg = "WHITE" })
+    y = y + hero_h + L.gap_sm
+
+    -- --- Tier 2: SSID, secondary -----------------------------------
+    -- Long SSIDs (wifi allows up to 32 characters, well past this
+    -- device's own short "Basik#Ops") step down to size 1 instead of
+    -- truncating -- this is an identity string the user needs to read in
+    -- full to confirm which network they're on, so cutting characters
+    -- off it is the one failure mode worth avoiding here, unlike the
+    -- fixed-format technical fields below.
+    M.draw_text(content_x, y, "WI-FI NETWORK", { size = 1, fg = "WHITE", bg = "GRAY6" })
+    y = y + 8 + L.gap_xs
+    local ssid_size = (#info.ssid <= L.netinfo_ssid_max_wide_chars) and 2 or 1
+    local ssid_slot_h = 16 -- fixed regardless of ssid_size, so the
+                            -- reference-field block below always starts
+                            -- at the same y
+    M.draw_text(content_x, y + math.floor((ssid_slot_h - 8 * ssid_size) / 2),
+        info.ssid, { size = ssid_size, fg = "WHITE", bg = "GRAY6" })
+    -- gap_lg here, not gap_sm like the gap above the hero box -- this is
+    -- a bigger jump than the type-size step alone would suggest, and
+    -- that's deliberate: it marks a real semantic boundary, not just a
+    -- visual one. IPv4 + SSID together are "network identity" (what
+    -- network, what address); the four rows below are a separate
+    -- "technical spec" group (mask/gateway/signal/MAC) nobody reads
+    -- top-to-bottom, only scans for the one field they came for. The
+    -- bigger gap is what tells the eye those are two different lists,
+    -- not one continuous six-row one.
+    y = y + ssid_slot_h + L.gap_lg
+
+    -- --- Tier 3: mask/gateway/signal/MAC, the divider-column list --
+    -- Same construction as draw_daily_row's time column: short labels
+    -- right-aligned flush against a vertical rule, values left-aligned
+    -- just past it -- size alone (1, vs size 2 for SSID and size 3 for
+    -- the hero) carries the "this is reference data" demotion, since
+    -- there's no darker tone available than the card's own GRAY6 fill to
+    -- dim these into (contrast draw_daily_row, which dims onto a WHITE
+    -- background and so has GRAY6 available as the muted color).
+    local REFERENCE_ROWS = {
+        { label = "MASK", value = info.mask },
+        { label = "GATEWAY", value = info.gateway },
+        { label = "SIGNAL", value = info.signal },
+        { label = "MAC", value = info.mac },
+    }
+    -- "GATEWAY" is the longest label and sets the column width, the same
+    -- "computed from the actual longest real content, not guessed"
+    -- treatment L.daily_time_col_w gets.
+    local label_col_w = text_w("GATEWAY", 1)
+    local divider_x = content_x + label_col_w + L.gap_xs
+    local value_x = divider_x + 2 + L.gap_xs
+    local row_pitch = 8 + L.gap_xs -- 8px size-1 glyph + gap_xs leading
+    local rule_h = (#REFERENCE_ROWS - 1) * row_pitch + 8
+    M.fill_rect(divider_x, y, 2, rule_h, "BLACK")
+    for _, row in ipairs(REFERENCE_ROWS) do
+        local label_x = divider_x - L.gap_xs - text_w(row.label, 1)
+        M.draw_text(label_x, y, row.label, WHITE_ON_GRAY)
+        M.draw_text(value_x, y, row.value, WHITE_ON_GRAY)
+        y = y + row_pitch
+    end
+    y = y - L.gap_xs + L.gap_lg -- undo the last row's trailing leading, replace with the section gap
+
+    -- Dismiss hint -- kept, not dropped: the popup auto-dismisses
+    -- silently after 10s with no other visible affordance for
+    -- tap-outside, so a first-time user genuinely needs the cue. The
+    -- only centered line in the card; every other element shares its
+    -- left edge at content_x.
+    local hint = "Tap outside to close"
+    M.draw_text(
+        card_x + math.floor((L.netinfo_card_w - text_w(hint, 1)) / 2),
+        y, hint, { size = 1, fg = "WHITE", bg = "GRAY6" })
+
+    local outer = { x = card_x, y = card_y, w = L.netinfo_card_w, h = L.netinfo_card_h }
+    -- Flushing just the card's own bounding box, not the whole screen,
+    -- keeps this a partial refresh -- same reasoning as the toast's
+    -- M.flush(waveform, rect) above.
+    M.flush("GC16", outer)
+    return outer
 end
 
 return M

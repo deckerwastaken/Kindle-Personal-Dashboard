@@ -120,15 +120,17 @@ and return hit_zones" renderer.
 |----------------|-----------------------|------------|
 | `dashboard`    | Today: tasks, Claude usage card, footer controls | Today |
 | `learning`     | Learning: courses + books, progress bars | Learning |
+| `daily`        | Daily: recurring habit checklist, time-ordered | Daily |
 | `keyboard`     | Add Task on-screen keyboard | (none) |
 | `confirm_exit` | Exit Dashboard confirmation | (none) |
 
-The bottom nav bar's tabs are Today / Learning / Habits / Home. Today and
-Learning are real screens and switch instantly; Habits and Home are still
-stubs that raise a "coming soon" toast. `ui.NAV_TAB_IMPLEMENTED` is what
-decides which is which, and it also drives the bar's three visual states:
-active (inverted black), available (plain black text), unavailable
-(gray).
+The bottom nav bar's tabs are Today / Learning / Daily / Home. Today,
+Learning, and Daily are real screens and switch instantly; Home is still
+a stub that raises a "coming soon" toast (Daily itself replaced the old
+"Habits" stub once this feature shipped). `ui.NAV_TAB_IMPLEMENTED` is
+what decides which is which, and it also drives the bar's three visual
+states: active (inverted black), available (plain black text),
+unavailable (gray).
 
 ### The Claude usage card
 
@@ -136,8 +138,8 @@ Sits at a fixed position on the Today screen, above the footer controls,
 showing claude.ai's own "current session" rate-limit percentage, a
 progress bar and when it resets.
 
-**Tap anywhere on the card to refresh it** — the label, the percentage,
-the bar, the resets line, all of it — rather than only the small circular
+**Tap anywhere on the card to refresh it** - the label, the percentage,
+the bar, the resets line, all of it - rather than only the small circular
 -arrow icon in its corner. The icon is still drawn, because it is the only
 thing that says the card *does* anything, but it is no longer the target.
 
@@ -178,10 +180,56 @@ simply a row whose `detail` is non-empty, and that string doubles as the
 type signal, which is why there's no separate badge or icon. See
 `backend/README.md`'s field notes and `_recompute` in `backend/state.py`.
 
+### The Daily habits screen
+
+A dedicated full screen for a recurring checklist, modeled on a calendar
+day view rather than a to-do list: each row is a time, a topic, and a
+checkbox. `M.draw_daily` (`src/ui.lua`) mirrors the Today task row almost
+exactly -- same checkbox, same delete zone, same tap-to-toggle -- with one
+addition, a TIME column between the checkbox and the topic text.
+
+**UNLIKE Learning, this screen is NOT read-only.** Toggling done and
+deleting an item both happen right here on the device, reusing the Today
+task list's exact interactions (`toggle_daily`/`delete_daily_zone` hit
+zones, the same double-tap-to-confirm delete pattern -- see
+`handle_daily_tap` in `daemon.lua`). Only *adding* a new item stays
+Telegram-only (`/daily 7:00 AM Meditate`), because that's the one
+operation needing a digit -- a time-of-day -- and the on-screen keyboard
+has none, the identical reasoning that makes the whole Learning screen
+read-only. It's worth stating plainly since it's an intentional
+asymmetry between the two list screens, not an inconsistency: Learning
+has zero on-device actions because *every* edit needs a number; Daily
+has two of its three actions on-device because only one of them does.
+
+**Items never reorder.** Unlike the Today task list (where completed
+tasks sink to the bottom) and the Learning list (where finished items
+sink too), a daily item stays in its fixed time slot regardless of done
+state -- `draw_daily` renders `state.dailies` straight through in the
+backend's already-sorted order, with no partition step. A finished item
+instead gets " (done)" appended to its topic, the same suffix convention
+the Today screen already uses. This is the one deliberate exception to
+this app's usual "done sinks to the bottom" rule, because the screen's
+whole model is "what does my day look like", not "what's left to do".
+
+**Delete-arming is a separate id namespace from tasks.** Daily items
+have their own id sequence (see `backend/state.py`), so a task `#3` and
+a daily `D3` can coexist. `daemon.lua` tracks not just *which id* is
+armed for deletion but *which list* it belongs to
+(`armed_delete_kind`, `"task"` or `"daily"`) -- without that, switching
+from an armed delete on one screen to the other could highlight an
+unrelated row that happens to share the same number. Every tab switch
+also clears both, belt-and-suspenders.
+
+Optionally, each day's final completion state can mirror to a Google
+Sheet the user owns (`backend/google_sheets.py`) -- entirely a backend
+concern; the Kindle has no idea whether that's configured and draws the
+exact same screen either way. See `docs/GOOGLE_SHEETS_SETUP.md`.
+
 ### Paging and swiping
 
-Both list screens paginate rather than scroll (e-ink can't scroll
-smoothly, and every redraw is a visible flash). Two ways to move:
+All three list screens (Today's tasks, Learning, Daily) paginate rather
+than scroll (e-ink can't scroll smoothly, and every redraw is a visible
+flash). Two ways to move:
 
 - **The pager row**: a previous arrow, directly tappable page numbers,
   and a next arrow. Page 1 and the last page are always present in the
@@ -211,21 +259,21 @@ you left it on. `src/keys.lua` reads the button, `daemon.lua` owns the
 `screen_locked` flag.
 
 The screen also locks **by itself after 15 minutes with no taps, swipes
-or button presses** — same state, same way back. Configurable via
+or button presses** - same state, same way back. Configurable via
 `auto_lock_idle_ms` in `config.lua`; set it to `0` to switch it off. The
 default lives in `daemon.lua`, not only in `config.example.lua`, so an
 existing install picks the feature up without its device-local
 `config.lua` being edited.
 
 The word is not decoration. A completely blank Kindle is indistinguishable
-from a daemon that has silently died — something this device has a
-documented history of (see `ops/README.md`) — so an empty screen would
+from a daemon that has silently died - something this device has a
+documented history of (see `ops/README.md`) - so an empty screen would
 leave you guessing whether to press the button or restart the dashboard
 from the laptop. This screen was fully blank until 2026-08-12 for exactly
 the reason it isn't now.
 
 **The point is power, and on e-ink a static image costs nothing to keep
-on screen** — all the power goes on screen *refreshes* and on the CPU
+on screen** - all the power goes on screen *refreshes* and on the CPU
 waking to perform them. So locking suppresses the work, not just the
 pixels:
 
@@ -233,20 +281,20 @@ pixels:
 - the battery poll stops entirely (the sysfs read too, not just drawing)
 - state pushes from the laptop still update memory but draw nothing, so
   unlocking shows current data rather than a stale screen
-- touch input is ignored outright — a locked dashboard in a bag should
+- touch input is ignored outright - a locked dashboard in a bag should
   not be completing tasks
 
 `redraw()` enforces the lock centrally rather than each call site
 checking, because a dozen paths can trigger a draw and one of them
 forgetting would put pixels back on a locked screen. The two draws that
-*don't* go through `redraw()` — the toast (`show_flash`) and the toast's
-auto-dismiss — are guarded individually; both are noted in the code.
+*don't* go through `redraw()` - the toast (`show_flash`) and the toast's
+auto-dismiss - are guarded individually; both are noted in the code.
 
 The WebSocket stays connected while locked. Dropping it would save a
 little radio power, but an unlock would then show stale data until a
 reconnect finished, and this device's wifi is historically the least
 reliable part of the system (see `ops/README.md`). The bigger win, if
-this is ever worth pushing further, would be real suspend-to-RAM —
+this is ever worth pushing further, would be real suspend-to-RAM -
 `powerd` is still running and, confirmed on hardware, ignores the button
 entirely, so that avenue is open.
 
@@ -255,28 +303,28 @@ entirely, so that avenue is open.
 Two additions on top of the plain lock above, both opt-in:
 
 - **A 4-digit PIN**, set with Telegram's `/setpin` (there's no on-device
-  way to set it — same reason the Learning screen is read-only: the
+  way to set it - same reason the Learning screen is read-only: the
   Add Task keyboard has no digits). Once `lock_pin` is non-empty, the
   power button no longer unlocks instantly from the blank **Locked**
-  screen — it shows a small numeric keypad instead (`ui.lua`'s
+  screen - it shows a small numeric keypad instead (`ui.lua`'s
   `M.draw_pin_entry`), and only the correct 4 digits actually unlock.
   Pressing power again while the keypad is up cancels back to the plain
   blank screen rather than being misread as an unlock attempt.
 
   The PIN is checked **entirely on the Kindle**, not round-tripped to
-  the backend on every attempt — the device has to stay unlockable
+  the backend on every attempt - the device has to stay unlockable
   during a WiFi/backend outage, same reasoning as leaving the WebSocket
   connected through a lock. That means `lock_pin` travels to the Kindle
   in the ordinary state broadcast, in plain text, like every other field
   in this project's WebSocket protocol (see backend/README.md's
-  "no authentication on these endpoints" note) — it is a deterrent
+  "no authentication on these endpoints" note) - it is a deterrent
   against a casual glance at the device, not a security boundary against
   anyone with access to your home network. Wrong attempts just clear the
   entry and let you retry; there's no lockout, by design (this is a
   device only you physically hold).
 
   `pin_entry_active` in `daemon.lua` is a flag orthogonal to both
-  `screen_locked` and `ui_mode` — the identical "overlay, don't add a
+  `screen_locked` and `ui_mode` - the identical "overlay, don't add a
   mode" treatment `screen_locked` itself gets, and for the same reason:
   it lets a cancelled PIN entry return to exactly the blank screen it
   interrupted without having to remember and restore anything.
@@ -285,12 +333,12 @@ Two additions on top of the plain lock above, both opt-in:
   for the plain locked screen.
 
 - **`/lock` from Telegram.** Sends `{"type": "command", "command":
-  "lock"}` over the same WebSocket the state pushes use — a distinct
+  "lock"}` over the same WebSocket the state pushes use - a distinct
   message shape (see backend/README.md's "Backend -> Kindle (commands)"
   section), checked before the state-snapshot branch so it can never be
   confused with one. `daemon.lua` calls the exact same
   `set_screen_locked(true, ...)` the power button and idle auto-lock
-  already use, so a remote lock is indistinguishable from a local one —
+  already use, so a remote lock is indistinguishable from a local one -
   same PIN required to get back in, if one is set. There is
   deliberately no matching `unlock` command: remote locking can only
   make an unattended device safer, never less so.
@@ -299,7 +347,7 @@ Two additions on top of the plain lock above, both opt-in:
 
 The daemon is told the laptop's address once, at startup. When a DHCP
 lease moves the laptop mid-session, that address is simply wrong and
-nothing on the device can fix it — which is exactly what happened on
+nothing on the device can fix it - which is exactly what happened on
 2026-08-12, costing 25 minutes of taps that went nowhere.
 
 So the backend broadcasts `KDASH1 <ip> <port>` on UDP 8001 every 5s
@@ -307,7 +355,7 @@ So the backend broadcasts `KDASH1 <ip> <port>` on UDP 8001 every 5s
 
 **A beacon is only acted on while the daemon is NOT connected.** A
 working connection already proves the address is right, and a beacon
-can't improve on that — but it *can* make things worse: a laptop with
+can't improve on that - but it *can* make things worse: a laptop with
 both wifi and ethernet may truthfully announce an address the Kindle has
 no route to, and adopting it would drop a healthy connection for a dead
 one. Waiting until we're offline costs nothing, because the case this
@@ -319,13 +367,13 @@ Beacons naming anything outside the private ranges are refused
 (`tests/test_discovery.lua`). That is a limit on blast radius, not real
 authentication: these broadcasts are unauthenticated, anything on your
 LAN can send one, and `discovery_enabled = false` in `config.lua` turns
-the whole thing off. The same trust model as the rest of the project —
-the WebSocket has no authentication either — but now one packet easier
+the whole thing off. The same trust model as the rest of the project -
+the WebSocket has no authentication either - but now one packet easier
 to abuse, which is a choice worth making deliberately.
 
 **The Kindle's firewall must allow the port, and this is not optional.**
 The INPUT chain's policy is DROP, and the rule that looks like a blanket
-`ACCEPT all` in `iptables -L INPUT -n` is scoped to `usb0` — you only see
+`ACCEPT all` in `iptables -L INPUT -n` is scoped to `usb0` - you only see
 that with `-v`, which is what made the first reading of it wrong.
 `bin/run.sh` adds the rule at every start (rules don't survive a reboot).
 Verified in both directions: with the rule every beacon arrives; without
@@ -334,7 +382,7 @@ is delivered. `tools/discovery_probe.lua` runs on the device and prints
 whatever reaches the port, which separates "the network is blocking it"
 from "it arrived and was rejected".
 
-### Sockets are non-blocking via SOCK_NONBLOCK, not fcntl — read this before touching posix.lua
+### Sockets are non-blocking via SOCK_NONBLOCK, not fcntl - read this before touching posix.lua
 
 `fcntl(fd, F_SETFL, O_NONBLOCK)` **does not work through this FFI
 binding on this device.** The third argument is passed variadically and
@@ -350,7 +398,7 @@ This was live for months before anything noticed, because the symptoms
 don't look like a socket-flags problem:
 
 - `connect()` to an unreachable address **blocked the entire main
-  loop** — touch, the power button, redraws — until the kernel gave up.
+  loop** - touch, the power button, redraws - until the kernel gave up.
   Measured at 3 seconds to an unused LAN address; a black-holed one would
   be far worse.
 - A read on an empty socket waited for data instead of returning EAGAIN.
@@ -365,9 +413,9 @@ gap between beacons".
 
 The main loop used to wait a flat `poll_timeout_ms` (500ms) every
 iteration, so the CPU woke twice a second forever, idle or not. It now
-sleeps until whichever piece of *timed* work is due soonest — the clock
+sleeps until whichever piece of *timed* work is due soonest - the clock
 redraw, the battery poll, a toast expiring, a reconnect attempt, the idle
-auto-lock — which is roughly **60 wakeups an hour instead of 7200**.
+auto-lock - which is roughly **60 wakeups an hour instead of 7200**.
 
 This costs nothing in responsiveness, and that is worth being precise
 about: `poll()` returns the instant a touch, a power-button press or a
@@ -377,25 +425,25 @@ now as the *floor*.
 
 The failure mode this introduces is the one to know about. A deadline
 that fires without being advanced sits permanently in the past, and every
-wait then collapses to the floor — a busy loop on a battery device. The
+wait then collapses to the floor - a busy loop on a battery device. The
 flat tick hid exactly that, and one such deadline already existed: the
 periodic clock redraw goes through `redraw_if_dashboard()`, which draws
 nothing while the keyboard or exit-confirm screen is up, and only a real
 draw stamps `last_clock_redraw_ms`. The clock block now advances it
 either way. `tests/test_poll_pacing.lua` runs the loop's timers against a
-simulated clock and counts the wakeups, so this stays honest — **any new
+simulated clock and counts the wakeups, so this stays honest - **any new
 timed block in the main loop needs a deadline that always advances, and a
 case in that test.**
 
 CONFIRMED ON HARDWARE (2026-08-11): the button is the PMIC on-key
 (`max77696-onkey`, `/dev/input/event0`) and emits a clean
 `KEY_POWER` press/release pair with no repeat and no bounce. Nothing else
-claims it — no process holds the node open, and `powerd` neither suspends
+claims it - no process holds the node open, and `powerd` neither suspends
 the device nor reacts. That is a different situation from the touch
 panel, where Xorg *does* hold an exclusive grab and has to be stopped
 first. The daemon acts on the **release** edge, both because that's the
 conventional edge for a toggle and because this PMIC has a separate
-long-press "manual reset" line that powers the device off — triggering on
+long-press "manual reset" line that powers the device off - triggering on
 press would fire the toggle on the way into a deliberate power-off.
 
 ### The battery indicator
@@ -418,7 +466,7 @@ percentage never looks broken, so it would never get investigated; a
 visible dash does. `tools/battery_probe.sh` dumps what the device really
 exposes.
 
-## On-device controls (Exit Dashboard, Restart SSH, Add/Delete Task)
+## On-device controls (Exit Dashboard, Network Info, Add/Delete Task)
 
 Beyond the read-only Today view described above, the dashboard has four
 pieces of interactive UI, all handled by `src/daemon.lua`'s `ui_mode`
@@ -435,16 +483,26 @@ dispatch in `handle_tap`, with all drawing/layout owned by `src/ui.lua`:
   the on-device answer to the "you need SSH to stop the dashboard, but
   stopping it is what you'd do to get SSH back" problem -- no
   laptop/SSH involvement needed.
-- **Restart SSH.** The button next to Exit Dashboard. Checks whether
-  dropbear (KOReader's bundled SSH server) is already running (a real
-  `ps`/`grep` process check, not just a pidfile) and, if not, starts it
-  via the configurable `config.ssh_restart_cmd` (see config.example.lua
-  -- **this command is now CONFIRMED on hardware**, copied directly from
-  KOReader's own installed `SSH.koplugin/main.lua`, not a guess -- see
-  the comment above that field for exactly what was verified and how).
-  Always leaves a toast (`ui.flash_message`) saying what happened:
-  already running / started / failed (with whatever output it could
-  capture).
+- **Network Info.** The button next to Exit Dashboard. Draws a popup
+  over the current screen with the Kindle's current wifi network name,
+  IPv4 address, subnet mask, gateway, signal strength, and MAC address
+  (`ui.draw_network_info_popup`, values gathered by
+  `get_network_info()` in `src/daemon.lua` -- `ifconfig`/`route -n`/`iw
+  dev wlan0 link`, output formats **CONFIRMED on hardware**, 2026-08-21
+  live SSH session). This is the on-device answer to "what IP do I SSH
+  into right now" without needing KOReader's own SSH-server screen open
+  at the same time -- and since this device reconnects to a previously
+  saved wifi network on its own, this is normally all you need even
+  after switching networks. The popup closes itself after 10 seconds, or
+  immediately on a tap outside the box; a tap inside it is a no-op (read
+  the info, don't dismiss). Replaces the old "Restart SSH" button, which
+  restarted dropbear (KOReader's bundled SSH server) via a configurable
+  shell command if it had died. That recovery path is gone along with the
+  button -- dropbear has been reliable enough in practice that finding the
+  current IP (needed on every reconnect anyway, since it changes) was the
+  far more useful thing to have one tap away. If SSH ever does stop
+  responding, the fallback is now the same one "Exit Dashboard" already
+  offers: reboot the device from the button next to this one.
 - **Add Task.** An always-visible "+ Add Task" row at the bottom of the
   task list (see `max_visible_tasks` in `src/ui.lua` for how the row
   budget was resized to always leave room for this). Tapping it switches
@@ -468,7 +526,12 @@ dispatch in `handle_tap`, with all drawing/layout owned by `src/ui.lua`:
   showing, a stray tap should read as "cancel that", not "cancel that
   AND also do this other thing". `touch.lua` only does single-tap
   down/up detection (no long-press), which is exactly why this is a
-  two-single-taps pattern rather than a press-and-hold.
+  two-single-taps pattern rather than a press-and-hold. **The Daily
+  screen's items reuse this exact pattern** (`delete_daily_zone`,
+  `handle_daily_tap`) -- see its own section above for the one addition,
+  a separate `armed_delete_kind` so an armed task and an armed daily item
+  (which can share the same numeric id) never get confused for each
+  other.
 
 Horizontal centering of text (the keyboard's key labels, the pager's page
 numbers) depends on the per-glyph width at sizes above 1, which is

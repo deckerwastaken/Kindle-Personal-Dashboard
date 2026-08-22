@@ -4,8 +4,9 @@ Always-on local service that runs on your Windows laptop. It:
 
 1. Runs the Telegram bot from a single authorized chat -- tasks (`/add`, `/done`,
    `/delete`), learning progress (`/course`, `/book`, `/percent`, `/page`, `/total`),
-   plus `/list` and `/help`. See `telegram_bot.py` for the full command surface and
-   the parsing conventions behind it.
+   daily habits (`/daily`, `/dailyhistory`, `/dailysync`, plus `/done`/`/delete`),
+   the lock PIN (`/setpin`, `/lock`), plus `/list` and `/help`. See `telegram_bot.py`
+   for the full command surface and the parsing conventions behind it.
 2. Polls the Anthropic Admin API every 15 minutes for today's total token usage.
 3. Persists all state (tasks + learnings + Claude usage) to a local JSON file,
    atomically.
@@ -46,6 +47,8 @@ This document is the contract for whoever builds the Kindle-side daemon -- read 
    | `CLAUDE_ORG_ID`        | Optional  | Your claude.ai organization ID, needed alongside `CLAUDE_SESSION_KEY`. |
    | `DISCOVERY_ENABLED`    | Optional  | Defaults to on. Broadcasts this machine's LAN address every 5s so the Kindle can re-find it after a DHCP change (see `discovery.py`). Set to `0` to disable -- the beacons are unauthenticated LAN broadcasts, so it is a deliberate choice. |
    | `DISCOVERY_PORT`       | Optional  | Defaults to `8001`. Must match `discovery_port` in the Kindle's `src/config.lua`, and it is the port `kindle-daemon/bin/run.sh` opens in the Kindle's firewall. |
+   | `GOOGLE_SHEETS_CREDENTIALS_FILE` | Optional | Path to a Google service-account JSON key file. If absent/blank (or the paired variable below is), daily-habit history stays local-only (`state.json`'s `daily_history`) and everything else works normally. See `docs/GOOGLE_SHEETS_SETUP.md` for the full no-jargon walkthrough. |
+   | `GOOGLE_SHEETS_SPREADSHEET_ID` | Optional | The target Google Sheet's ID (from its URL), shared with the service account as Editor. Needed alongside `GOOGLE_SHEETS_CREDENTIALS_FILE` -- see `google_sheets.py`. |
 
    `backend/.env` is git-ignored (both by the repo root `.gitignore` and
    `backend/.gitignore`) -- never commit real secrets.
@@ -153,6 +156,14 @@ it last received; there is no incremental diffing.
     "last_updated": "2026-08-04T10:39:12.001482+00:00"
   },
   "lock_pin": "1234",
+  "dailies": [
+    {"id": 1, "minutes": 420, "time": "7:00 AM", "topic": "Meditate", "done": true},
+    {"id": 2, "minutes": 1140, "time": "7:00 PM", "topic": "Dinner prep", "done": false}
+  ],
+  "daily_history": {
+    "2026-07-29": {"1": true, "2": false}
+  },
+  "daily_last_reset": "2026-07-30",
   "last_updated": "2026-07-30T14:32:10.482201+00:00"
 }
 ```
@@ -213,6 +224,39 @@ Field notes:
   `kindle-daemon/src/daemon.lua`'s pin-entry handling), not round-tripped back to
   this backend on every unlock attempt, so the device stays unlockable even if the
   backend/WiFi is down.
+- `dailies`: array of recurring habit-checklist items, modeled on a calendar day
+  view rather than a to-do list -- see `state.py`'s "daily habits" section. Its own
+  id sequence, independent of both `tasks` and `learnings` (there can be a task
+  `#1`, a learning `L1`, *and* a daily `D1` at once). Shown as `D<id>` in every
+  Telegram reply, the `D` never stored. **Always sorted by `minutes`** (server-side,
+  at the wire boundary -- see `snapshot()`), so the Kindle renders it in
+  chronological order with zero sort logic of its own -- and, UNLIKE `tasks`, a
+  finished item stays in its time slot rather than sinking to the bottom.
+- `dailies[].minutes`: integer 0-1439, minutes since local midnight -- the sort
+  key. Not rendered directly; `time` is what's drawn.
+- `dailies[].time`: pre-formatted 12-hour display string (e.g. `"7:00 AM"`),
+  computed once by the Telegram command parser at add-time
+  (`telegram_bot.py`'s `_parse_daily_time`, which also accepts 24h input and
+  always normalizes to this format) and then just displayed verbatim everywhere
+  -- the Kindle does zero time-formatting of its own, same reasoning as
+  `session_usage.resets_label` above.
+- `dailies[].topic`: string, capped at the same 500 chars as task text.
+- `dailies[].done`: boolean. Resets to `false` for every item once a day, at local
+  midnight (a background poll loop, not a precise timer -- see
+  `maybe_reset_dailies` in `state.py`), which is also when the outgoing day's
+  completion state gets archived into `daily_history` below.
+- `daily_history`: a local archive of past days' completion, keyed by ISO date
+  string, each value mapping a daily item's id (as a **string** key, since JSON
+  object keys are always strings) to whether it was done that day. **The Kindle
+  renderer never reads this** -- it exists for Telegram's `/dailyhistory` and is
+  present here only because a state broadcast is the whole state blob, not a
+  curated subset. An ABSENT date key means "no data for that day" (the backend
+  wasn't running at that midnight) -- deliberately distinct from a PRESENT key
+  mapping every item to `false` (a real day where nothing got done); don't collapse
+  the two if you ever build something that reads this field.
+- `daily_last_reset`: ISO date string, the last local calendar date
+  `maybe_reset_dailies` actually ran a reset for -- `""` before the very first
+  reset. Backend bookkeeping only; **the Kindle renderer never reads this either.**
 - top-level `last_updated`: ISO-8601 UTC timestamp of the last state mutation of any
   kind (bump this is what changed, not `claude_usage.last_updated`, if you need "is
   this fresh" logic for the whole payload).
@@ -254,15 +298,25 @@ stays open.
 | `add_task`      | `text` (non-empty string) | Appends a new task with `done: false`.        |
 | `toggle_task`   | `id` (integer)            | Flips that task's `done` flag (the checkbox-tap case). |
 | `delete_task`   | `id` (integer)            | Removes that task entirely.                   |
+| `toggle_daily`  | `id` (integer)            | Flips that daily item's `done` flag (the checkbox-tap case; also fires a live, fire-and-forget Google Sheets sync if configured -- see below). |
+| `delete_daily`  | `id` (integer)            | Removes that daily item entirely (same live-sync side effect). |
 | `refresh_usage` | none                      | Forces an immediate `session_usage` re-fetch instead of waiting for the next scheduled poll. Rate-limited server-side: one real fetch per `MIN_MANUAL_REFRESH_INTERVAL_SECONDS` (10s) and at most `MAX_MANUAL_REFRESHES_PER_HOUR` (20) -- see `claude_session_usage.py`. Either limit rejects with a `refresh_failed` error instead of hitting claude.ai again. |
 
-**There are deliberately no learning actions.** `learnings` is push-only: the Kindle
-displays it and never mutates it. Every learning edit needs a *number* (a percentage,
-a page), and the device's on-screen keyboard is lowercase letters plus space -- it has
-no digits at all (see `kindle-daemon/src/ui.lua`'s keyboard section). Rather than
-build a numeric keypad for a device that already has a perfectly good text-input
-channel, Telegram owns all learning mutation. If that ever changes, the actions to add
-are the direct analogues of the `StateStore.set_learning_*` methods.
+**There are deliberately no learning actions**, but there ARE `toggle_daily`/
+`delete_daily` ones -- an intentional asymmetry, not an inconsistency. `learnings` is
+push-only: the Kindle displays it and never mutates it, because every learning edit
+needs a *number* (a percentage, a page), and the device's on-screen keyboard is
+lowercase letters plus space -- it has no digits at all (see
+`kindle-daemon/src/ui.lua`'s keyboard section). Daily items are different: toggling
+done and deleting need no digit, only *adding* one does (a time-of-day) -- so those
+two actions live on the device exactly like the task ones above, and only `/daily`
+(add) stays Telegram-only. If learning mutation ever needs a device-side path, the
+actions to add are the direct analogues of the `StateStore.set_learning_*` methods.
+
+**No `add_daily` action.** Same reasoning as learnings having no device-side
+mutation at all: adding a daily item needs a time-of-day, a number, and the
+on-screen keyboard has none. `/daily <time> <topic>` (Telegram) is the only way to
+add one -- see `telegram_bot.py`'s `_parse_daily_time`.
 
 **Examples:**
 
@@ -276,6 +330,14 @@ are the direct analogues of the `StateStore.set_learning_*` methods.
 
 ```json
 {"action": "delete_task", "id": 3}
+```
+
+```json
+{"action": "toggle_daily", "id": 1}
+```
+
+```json
+{"action": "delete_daily", "id": 1}
 ```
 
 There is intentionally no `mark_done` action mirroring Telegram's `/done` (which
@@ -325,17 +387,28 @@ may change wording -- don't parse it, just log/display it.
   small JSON file (personal task list, not meant to scale past a few dozen items).
 - `backend/state.py` (`StateStore`) is the single source of truth for all mutations.
   Both the Telegram bot and the Kindle WebSocket handler call the same methods
-  (`add_task`, `toggle_task`, `mark_done`, `delete_task`, `set_usage`), so there's one
-  code path for "change a task" no matter who asked for it, and it always: acquires an
-  `asyncio.Lock` -> mutates -> persists atomically -> broadcasts to all WS clients.
+  (`add_task`, `toggle_task`, `mark_done`, `delete_task`, `set_usage`, and the daily
+  equivalents `add_daily`/`toggle_daily`/`mark_daily_done`/`delete_daily`), so there's
+  one code path for "change a task" no matter who asked for it, and it always:
+  acquires an `asyncio.Lock` -> mutates -> persists atomically -> broadcasts to all WS
+  clients.
 - `backend/ws_manager.py` (`ConnectionManager`) tracks connected WebSocket clients and
   broadcasts to all of them; dead connections are pruned automatically on send
   failure.
-- `backend/telegram_bot.py` and `backend/anthropic_usage.py` are asyncio background
-  tasks started in `main.py`'s FastAPI `lifespan`, using `httpx.AsyncClient` (not
-  blocking `requests`). Each polling loop wraps its body in try/except so a bad
-  token/key or a transient network error is logged and skipped, never crashes the
-  loop or the app.
+- `backend/telegram_bot.py`, `backend/anthropic_usage.py`, and `backend/daily_reset.py`
+  are asyncio background tasks started in `main.py`'s FastAPI `lifespan`, using
+  `httpx.AsyncClient` (not blocking `requests`) where they make HTTP calls.
+  `daily_reset.py` is a 60s poll loop calling `StateStore.maybe_reset_dailies()` --
+  deliberately a plain interval poll rather than a precise sleep-until-midnight timer,
+  since this backend isn't always running (the laptop sleeps, it's started/stopped by
+  hand). Each loop wraps its body in try/except so a bad token/key or a transient
+  network error is logged and skipped, never crashes the loop or the app.
+- `backend/google_sheets.py` mirrors each day's daily-habit completion into a Google
+  Sheet the user owns, entirely optional (same "disabled until configured" pattern as
+  the Anthropic usage pollers) -- see `docs/GOOGLE_SHEETS_SETUP.md` and
+  `sync_day()`'s own docstring. Every blocking `gspread` call runs via
+  `asyncio.to_thread`, since `gspread` has no asyncio support and this backend's
+  WebSocket connection to the Kindle must never stall behind a Sheets API call.
 - Auto-start, auto-restart-on-crash, and file logging are handled by
   `backend/ops/` (a Task Scheduler-based wrapper, chosen over a raw manual
   `uvicorn` command or a third-party service tool like NSSM for the best

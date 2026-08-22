@@ -7,25 +7,28 @@
 
 A personal dashboard on a jailbroken Kindle e-reader: a Today screen with
 your task list and Claude usage, a Learning screen tracking your progress
-through courses and books, and a Telegram bot to feed both — rendered
-directly to the e-ink screen and controlled by touch, swipe, and the
-power button (which locks the screen and idles the dashboard, optionally
-behind a 4-digit PIN entered on a numeric keypad). Telegram can also lock
-the screen remotely. No cloud, no third-party service — the backend runs
-on your own laptop.
+through courses and books, a Daily screen for a recurring habit checklist,
+and a Telegram bot to feed all three - rendered directly to the e-ink
+screen and controlled by touch, swipe, and the power button (which locks
+the screen and idles the dashboard, optionally behind a 4-digit PIN
+entered on a numeric keypad). Telegram can also lock the screen remotely.
+No cloud, no third-party service, with one deliberate opt-in exception -
+daily-habit history can optionally sync to a Google Sheet you own (see
+[Security](#security)) - everything else runs entirely on your own
+laptop.
 
 > ### ⚠️ Vibe-coded disclaimer
-> This entire project — architecture, backend, the native Kindle daemon,
-> the tests, and these docs — was built through conversational
+> This entire project - architecture, backend, the native Kindle daemon,
+> the tests, and these docs - was built through conversational
 > pair-programming with **[Claude Code](https://claude.com/claude-code)**
 > (Anthropic's [Claude](https://www.anthropic.com/claude), Sonnet 5
 > model), directed and verified on real hardware by a single hobbyist with
 > no professional software background. "Vibe-coded" here means the
 > author described what they wanted and reviewed/tested the result, not
 > that the code is unverified: every feature listed below was deployed to
-> the physical Kindle and confirmed working, and the project carries eight
+> the physical Kindle and confirmed working, and the project carries nine
 > automated test suites (see [Tests](#tests)). Treat it as a solo, AI-assisted
-> hobby project, not audited or production-grade software — read before you
+> hobby project, not audited or production-grade software - read before you
 > run it, especially anything touching your home network or your Kindle's
 > filesystem.
 
@@ -35,7 +38,7 @@ An old Kindle sits on a desk showing a dashboard instead of a book: the
 time, today's tasks, what you're learning, and how much of your Claude
 usage allowance you've used. You tap the screen to tick things off, and
 add new things from your phone over Telegram. Nothing leaves your home
-network — the "brain" is a small server you run on your own laptop, and
+network - the "brain" is a small server you run on your own laptop, and
 the Kindle only ever talks to that.
 
 Want the full plain-English feature tour? Read **[`CHANGELOG.md`](CHANGELOG.md)**.
@@ -49,14 +52,15 @@ flowchart LR
         TG["Telegram app"]
     end
 
-    subgraph Laptop["Your laptop — backend/ (FastAPI)"]
+    subgraph Laptop["Your laptop - backend/ (FastAPI)"]
         BOT["Telegram bot poller"]
         API["WebSocket + REST server\nmain.py"]
         USAGE["Claude usage pollers\nAnthropic Admin API + claude.ai session"]
+        SHEETS["google_sheets.py\n(optional)"]
         STATE[("state.json\n(atomic writes)")]
     end
 
-    subgraph Kindle["Jailbroken Kindle — kindle-daemon/ (LuaJIT)"]
+    subgraph Kindle["Jailbroken Kindle - kindle-daemon/ (LuaJIT)"]
         DAEMON["daemon.lua\nmain loop, event-paced"]
         FBINK["FBInk CLI\ne-ink rendering"]
         EVDEV["evdev\ntouch + power button"]
@@ -67,14 +71,18 @@ flowchart LR
     API <--> STATE
     USAGE -->|polls| ANTH["Anthropic API"]
     USAGE --> STATE
+    STATE -.->|daily habit history, opt-in| SHEETS
+    SHEETS -.->|writes| SHEET[("Google Sheet\nyou own")]
     API <==>|WebSocket, LAN only| DAEMON
     DAEMON --> FBINK
     EVDEV --> DAEMON
 ```
 
-Everything above runs on your own hardware and your own home network. The
-only outbound call is the backend polling the Anthropic API for usage
-numbers (optional, off by default until you add a key).
+Everything above runs on your own hardware and your own home network,
+with two deliberate, off-by-default exceptions (dashed lines above): the
+backend polling the Anthropic API for usage numbers, and - new in
+2.2 - daily-habit history mirroring to a Google Sheet you own. Neither
+happens until you add credentials for it.
 
 ## Tech stack
 
@@ -83,40 +91,50 @@ numbers (optional, off by default until you add a key).
 | **Backend** | `backend/` (runs on your laptop) | Python 3.11+, [FastAPI](https://fastapi.tiangolo.com/) + [uvicorn](https://www.uvicorn.org/), [httpx](https://www.python-httpx.org/) | Serves the WebSocket the Kindle connects to, polls the Telegram Bot API, polls the Anthropic API for usage stats, persists state as JSON |
 | **Kindle daemon** | `kindle-daemon/` (runs on the Kindle) | [LuaJIT](https://luajit.org/) + FFI, no external Lua libraries | Renders the UI by shelling out to the `fbink` CLI already on the device; reads touch/power input via `evdev`; hand-written WebSocket client, JSON codec, SHA-1, and base64 (all in `src/`) since the device has no package manager |
 | **Lockscreen** (optional) | `lockscreen/` | Shell script + KOReader config | Replaces the stock Kindle screensaver image with custom text |
-| **Messaging** | Telegram | [Telegram Bot API](https://core.telegram.org/bots/api) (raw HTTP, no SDK) | Add/list/complete tasks and learning progress, set the lock PIN, and lock the screen remotely from your phone |
+| **Messaging** | Telegram | [Telegram Bot API](https://core.telegram.org/bots/api) (raw HTTP, no SDK) | Add/list/complete tasks, learning progress, and daily habits; set the lock PIN; lock the screen remotely from your phone |
 | **Usage tracking** (optional) | Anthropic | [Anthropic Admin API](https://docs.anthropic.com/) + an unofficial claude.ai session endpoint | Powers the "Claude usage" card on the Today screen |
+| **Habit history** (optional) | Google Sheets | [gspread](https://docs.gspread.org/) + a Google service account | Mirrors each day's daily-habit completion into a spreadsheet you own, as a permanent history outside `state.json` - see `docs/GOOGLE_SHEETS_SETUP.md` |
 | **Display hardware** | Kindle 7th Gen (KT2) confirmed | [FBInk](https://github.com/NiLuJe/FBInk) | Direct framebuffer drawing to e-ink, no X server dependency |
 
-No database, no cloud service, no build step — the backend is a single
+No database, no cloud service, no build step - the backend is a single
 Python process and the daemon is a single Lua process.
 
 ## Screens
 
-There's no simulator and no rendered image path for this device — the
+There's no simulator and no rendered image path for this device - the
 daemon draws straight to the e-ink framebuffer via `fbink`, so these
 aren't photos, they're mockups built pixel-for-pixel from the real
 layout constants in `kindle-daemon/src/ui.lua` (600x800, the actual
 panel resolution). Colour is flat black/white/gray on purpose: that's
 what the hardware is.
 
-**Today** — clock, battery, connection status, the task list (checked
+**Today** - clock, battery, connection status, the task list (checked
 tasks sink to the bottom instead of disappearing), pagination, the
 Claude usage card, and the two recovery buttons:
 
 ![Today screen](docs/screens/today.svg)
 
-**Learning** — courses and books, each with a derived or manual
+**Learning** - courses and books, each with a derived or manual
 progress bar. Read-only on-device; all edits happen from Telegram:
 
 ![Learning screen](docs/screens/learning.svg)
 
-**Locked** — the power button blanks the screen to this rather than
+**Daily** - a recurring habit checklist modeled on a calendar day view:
+time, topic, and a checkbox, always in chronological order (a finished
+item stays in its time slot rather than sinking to the bottom). Tap to
+toggle or delete right on the device; adding a new habit is
+Telegram-only (`/daily 7:00 AM Meditate`), same reasoning as Learning -
+a time is a number, and the on-screen keyboard has none:
+
+![Daily screen](docs/screens/daily.svg)
+
+**Locked** - the power button blanks the screen to this rather than
 going fully dark, so a locked dashboard is never mistaken for a crashed
 one. Telegram's `/lock` can trigger the same screen remotely:
 
 ![Lock screen](docs/screens/lock.svg)
 
-**PIN entry** (optional) — set a 4-digit PIN with Telegram's `/setpin`,
+**PIN entry** (optional) - set a 4-digit PIN with Telegram's `/setpin`,
 and the power button shows this numeric keypad instead of unlocking
 instantly. Checked entirely on the Kindle itself, so unlocking still
 works with the backend offline; wrong attempts just clear and let you
@@ -126,7 +144,7 @@ retry, no lockout. `/setpin off` removes it:
 
 ### Interactions
 
-E-ink doesn't animate — there's no motion to show, no GIF that would be
+E-ink doesn't animate - there's no motion to show, no GIF that would be
 honest about how this hardware behaves. It snaps between static frames
 on refresh. So instead of a video, here's what each gesture actually
 does to the screen, as a before/after:
@@ -150,12 +168,12 @@ docs/          -- setup guide, jailbreak reference, and secrets policy.
 ```
 
 Already set up? Day-to-day use is two double-clickable scripts:
-`kindle-daemon/ops/Start_Dashboard.bat` and `Stop_Dashboard.bat` — see
+`kindle-daemon/ops/Start_Dashboard.bat` and `Stop_Dashboard.bat` - see
 `kindle-daemon/ops/README.md`.
 
 ## Tests
 
-There are eight suites. All of them run on your laptop with no Kindle, no
+There are nine suites. All of them run on your laptop with no Kindle, no
 network, and nothing to install beyond what the backend already needs:
 
 ```
@@ -166,18 +184,19 @@ cd kindle-daemon/tests && luajit test_hit_resolution.lua  # what a tap actually 
 cd kindle-daemon/tests && luajit test_poll_pacing.lua     # wakeups + connection watchdog
 cd kindle-daemon/tests && luajit test_discovery.lua       # beacon parsing/validation
 python backend/tests/test_learnings.py                    # from the repo root
+python backend/tests/test_daily.py                        # from the repo root
 python backend/tests/test_discovery.py                    # from the repo root
 ```
 
 `test_layout.lua` swaps a recorder in for the `fbink` CLI, renders each
-screen, and checks the drawing commands that *would* have been sent —
+screen, and checks the drawing commands that *would* have been sent -
 nothing off-screen, no overlapping tap targets, none under 40px,
 pagination eliding the right pages.
 
 `test_hit_resolution.lua` covers the gap that leaves: it takes those same
 tap zones and runs the *daemon's* own hit-testing over concrete pixel
 coordinates, asserting each lands on the control you aimed at. That
-distinction is not academic — a bug that made the entire task area
+distinction is not academic - a bug that made the entire task area
 untappable was invisible to the layout test (the layout was perfectly
 self-consistent; the consumer resolved it wrong) and is caught
 immediately by this one.
@@ -185,21 +204,21 @@ immediately by this one.
 `test_poll_pacing.lua` is about battery rather than pixels. The daemon
 sleeps until its next piece of timed work instead of waking on a fixed
 tick (~120 wakeups an hour rather than 7200), which is only safe as long
-as every deadline actually moves forward when it fires — one that doesn't
+as every deadline actually moves forward when it fires - one that doesn't
 turns the loop into a spin. This suite runs those timers against a
 simulated clock and counts, and covers the watchdog that spots a
 connection which has died without being closed.
 
 The two `test_discovery` suites sit on either side of one wire format:
 Python builds the beacon, Lua parses it, and nothing but the format
-connects them — a drift produces no error anywhere, just a dashboard that
+connects them - a drift produces no error anywhere, just a dashboard that
 quietly loses the ability to recover from an IP change. Each side pins the
 format, and the Lua one leans hardest on the *rejection* cases, since that
 parser decides where the daemon connects and any device on your network
 can send it a beacon.
 
 Together they cover the arithmetic. They deliberately cannot tell you
-whether anything *looks* right on real e-ink — ghosting, whether the
+whether anything *looks* right on real e-ink - ghosting, whether the
 pixel-art arrows read as triangles, whether a 2px outline is visible at
 167ppi. `kindle-daemon/tools/` holds the on-device diagnostics for that.
 
@@ -207,25 +226,34 @@ pixel-art arrows read as triangles, whether a 2px outline is visible at
 
 This project needs a **jailbroken** Kindle (meaning its normal software
 restrictions have been removed, so it can run programs Amazon didn't put
-there — see `docs/JAILBREAK_REFERENCE.md`), with KUAL and KOReader
+there - see `docs/JAILBREAK_REFERENCE.md`), with KUAL and KOReader
 installed on top of that. It was built and tested against a Kindle 7th
 Gen (2014, model WP63GW, KT2 hardware) jailbroken via WinterBreak2. Other
 jailbroken Kindle models will likely also work once KUAL/KOReader are
-installed, but haven't been tested — check
+installed, but haven't been tested - check
 `kindle-daemon/README.md`'s "What is genuinely unverified" section
 before investing time on a different device.
 
 ## Security
 
 Real secrets (Telegram bot token, Anthropic API key, the Kindle's local
-config) never live in this repo — see `docs/SECRETS.md` for the policy
+config) never live in this repo - see `docs/SECRETS.md` for the policy
 this project follows.
 
 The optional lock-screen PIN is checked entirely on the Kindle and never
-sent anywhere except this LAN's own unauthenticated WebSocket traffic —
+sent anywhere except this LAN's own unauthenticated WebSocket traffic -
 see `backend/README.md`'s `lock_pin` field note. It stops a casual glance
 at a device you left lying around, not a determined attacker with access
 to your home network.
+
+**Daily-habit history is the one thing in this project that can
+optionally leave your home network.** If you set up the (entirely
+opt-in) Google Sheets sync - see `docs/GOOGLE_SHEETS_SETUP.md` - each
+day's habit-completion data is copied to a Google Sheet you own, over
+Google's own API, using a service-account credential file you download
+and keep on your laptop. Skip that setup and nothing changes: the Daily
+screen, its Telegram commands, and the local history it keeps in
+`state.json` all work exactly the same either way.
 
 ## Credits
 
@@ -235,9 +263,9 @@ conversational pair-programming sessions with
 **[Claude](https://www.anthropic.com/claude) Sonnet 5**, [Anthropic](https://www.anthropic.com)'s
 coding-agent CLI. See the disclaimer at the top of this README for what
 that means in practice. No other third-party services, SDKs, or paid
-tools were used — everything here talks directly to FBInk, evdev, the
+tools were used - everything here talks directly to FBInk, evdev, the
 Telegram Bot API, and the Anthropic API over plain HTTP/WebSocket.
 
 ## License
 
-MIT — see `LICENSE`. Use it, fork it, adapt it for your own Kindle.
+MIT - see `LICENSE`. Use it, fork it, adapt it for your own Kindle.

@@ -47,6 +47,7 @@ ui.run = function() return true end
 local GESTURE_ZONE_KINDS = {
     task_swipe_area = true,
     learning_swipe_area = true,
+    daily_swipe_area = true,
 }
 
 local function zone_contains(z, x, y)
@@ -93,6 +94,17 @@ local function learning_state(n)
     return { tasks = {}, learnings = items, session_usage = { percent = 0, resets_label = "" } }
 end
 
+local function daily_state(n)
+    local items = {}
+    for i = 1, n do
+        items[i] = { id = i, minutes = (i % 24) * 60,
+                     time = string.format("%d:00 AM", (i % 12) + 1),
+                     topic = "Habit " .. i, done = false }
+    end
+    return { tasks = {}, learnings = {}, dailies = items,
+             session_usage = { percent = 0, resets_label = "" } }
+end
+
 --- The center of a zone is the point a user aiming at that control would
 --- most plausibly hit, so every tap target should resolve to itself there.
 local function center_of(z)
@@ -106,6 +118,8 @@ for _, case in ipairs({
     { "dashboard, 0 tasks", ui.draw_dashboard, { make_state(0), "open", 1, nil, 80 } },
     { "learning, 3 items", ui.draw_learning, { learning_state(3), "open", 1, 80 } },
     { "learning, 40 items (pager shown)", ui.draw_learning, { learning_state(40), "open", 3, 80 } },
+    { "daily, 3 items", ui.draw_daily, { daily_state(3), "open", 1, nil, 80 } },
+    { "daily, 40 items (pager shown)", ui.draw_daily, { daily_state(40), "open", 3, nil, 80 } },
     { "pin entry, empty buffer", ui.draw_pin_entry, { "", false } },
     { "pin entry, wrong-PIN error shown", ui.draw_pin_entry, { "", true } },
 }) do
@@ -161,6 +175,29 @@ do
     end
 end
 
+print("\n=== the daily area is tappable through its swipe band ===")
+do
+    local zones = ui.draw_daily(daily_state(3), "open", 1, nil, 80)
+
+    -- Same regression class as the task area's own check above: a
+    -- gesture zone must be registered and must cover the rows, otherwise
+    -- this test would pass vacuously if the swipe area were ever removed.
+    local swipe = find_zone_by_kind(zones, "daily_swipe_area", 300, L.daily_row_first_y + 20)
+    check("a swipe area covers the daily rows", swipe ~= nil)
+
+    local first_row_y = L.daily_row_first_y + 20
+    for _, t in ipairs({
+        { "daily checkbox", L.margin + 20, first_row_y, "toggle_daily" },
+        { "daily row body", 300, first_row_y, "toggle_daily" },
+        { "daily delete x", L.screen_w - L.margin - 20, first_row_y, "delete_daily_zone" },
+    }) do
+        local got = hit_test(zones, t[2], t[3])
+        check(t[1] .. " resolves to " .. t[4],
+            got ~= nil and got.kind == t[4],
+            "got " .. (got and got.kind or "nothing"))
+    end
+end
+
 print("\n=== the pager is tappable through the swipe band ===")
 do
     local zones = ui.draw_dashboard(make_state(20), "open", 3, nil, 80)
@@ -198,6 +235,12 @@ do
         find_zone_by_kind(lz, "learning_swipe_area", 300, L.learn_row_first_y + 10) ~= nil)
     check("learning swipe area does not extend into the nav bar",
         find_zone_by_kind(lz, "learning_swipe_area", 300, L.nav_y + 10) == nil)
+
+    local dz = ui.draw_daily(daily_state(40), "open", 1, nil, 80)
+    check("daily swipe area is recognised over its rows",
+        find_zone_by_kind(dz, "daily_swipe_area", 300, L.daily_row_first_y + 10) ~= nil)
+    check("daily swipe area does not extend into the nav bar",
+        find_zone_by_kind(dz, "daily_swipe_area", 300, L.nav_y + 10) == nil)
 end
 
 print("\n=== gesture zones are never returned as tap targets ===")
@@ -205,6 +248,7 @@ do
     for _, case in ipairs({
         { "dashboard", ui.draw_dashboard, { make_state(20), "open", 1, nil, 80 } },
         { "learning", ui.draw_learning, { learning_state(40), "open", 1, 80 } },
+        { "daily", ui.draw_daily, { daily_state(40), "open", 1, nil, 80 } },
     }) do
         local zones = case[2](unpack(case[3]))
         local leaked = nil

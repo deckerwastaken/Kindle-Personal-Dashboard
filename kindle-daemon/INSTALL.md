@@ -330,17 +330,14 @@ in README.md's "On-device controls" section:
   within a few seconds -- the task should disappear. Then try arming one
   and tapping somewhere else instead (a different task, empty space) --
   it should just un-highlight with nothing deleted.
-- **Restart SSH**: with SSH already connected (like the session you're
-  reading this over), tap "Restart SSH" -- it should show a toast saying
-  SSH is already running (harmless no-op). To actually test the "start
-  it from cold" path, you'd need SSH to be OFF when you tap it, which
-  means testing this specific path requires physical access to the
-  Kindle's screen without an existing SSH session -- not something to
-  test for the first time when SSH is your only way back in. The command
-  it runs (`config.ssh_restart_cmd` in `config.lua`) is copied directly
-  from KOReader's own SSH server code (see config.example.lua's comment
-  for exactly what was verified), so it's expected to work, but hasn't
-  been exercised end-to-end via this button specifically yet.
+- **Network Info**: tap "Network Info" -- a popup should appear over the
+  dashboard showing your wifi network name, IPv4 address, subnet mask,
+  gateway, signal strength, and MAC address. Check the IPv4 address
+  matches the one you're actually SSH'd into right now. It should
+  disappear on its own after about 10 seconds; tap it again and this time
+  tap somewhere OUTSIDE the popup box to confirm that dismisses it
+  immediately too. Tapping INSIDE the box should do nothing (it stays
+  open).
 - **Exit Dashboard**: save this for last, once everything else above has
   checked out -- tapping "Yes, Shut Down" reboots the device. Tap "Exit
   Dashboard", confirm you land on the Cancel/"Yes, Shut Down" screen, tap

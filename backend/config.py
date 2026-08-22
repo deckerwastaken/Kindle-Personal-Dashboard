@@ -51,6 +51,19 @@ HAS_CLAUDE_SESSION = (
     and not CLAUDE_ORG_ID.startswith("PASTE_YOUR_")
 )
 
+# Google Sheets sync for the daily habit tracker (see google_sheets.py).
+# Both values come from a one-time service-account setup, not an
+# interactive login -- see docs/GOOGLE_SHEETS_SETUP.md. Deliberately NOT
+# checking that the credentials file actually exists here: that would mean
+# doing a filesystem check at import time for a feature most installs
+# won't use, just to compute a boolean. A missing/bad file instead fails
+# lazily and loudly the first time google_sheets.sync_day() actually runs,
+# same "fails on first real use with a clear log line" treatment this
+# codebase already gives a bad ANTHROPIC_ADMIN_KEY.
+GOOGLE_SHEETS_CREDENTIALS_FILE = os.getenv("GOOGLE_SHEETS_CREDENTIALS_FILE", "")
+GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "")
+HAS_GOOGLE_SHEETS = bool(GOOGLE_SHEETS_CREDENTIALS_FILE and GOOGLE_SHEETS_SPREADSHEET_ID)
+
 # ======= State persistence =======
 STATE_FILE = BASE_DIR / "data" / "state.json"
 
